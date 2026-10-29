@@ -163,8 +163,9 @@ public final class SqlGraphService implements AutoCloseable {
         List<Path> out = new ArrayList<>();
         Path base = config.baseDir();
         for (String p : patterns) {
-            Path direct = base.resolve(p).normalize();
             if (!p.contains("*") && !p.contains("?")) {
+                // Windows 는 * ? 가 든 문자열을 Path 로 만들 수 없으므로 glob 이 아닐 때만 Path 로 변환
+                Path direct = base.resolve(p).normalize();
                 if (Files.isRegularFile(direct)) out.add(direct);
                 else log.accept("DDL 파일 없음: " + direct);
                 continue;
