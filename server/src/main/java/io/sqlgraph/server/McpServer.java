@@ -27,7 +27,8 @@ public final class McpServer {
     private static final String INSTRUCTIONS = """
             이 서버는 프로젝트의 DB 스키마(테이블·컬럼·코멘트)와 소스 속 SQL(MyBatis Mapper XML, .sql)을 \
             인덱싱해 둔 그래프입니다. 테이블/컬럼 구조, 특정 테이블을 쓰는 쿼리나 Mapper 위치, \
-            컬럼 변경 영향도 같은 질문에는 grep 으로 파일을 뒤지기 전에 이 도구들을 먼저 사용하세요. \
+            컬럼 변경 영향도, 테이블 간 조인 방법(find_join_path) 같은 질문에는 grep 으로 파일을 뒤지기 전에 \
+            이 도구들을 먼저 사용하세요. 테이블 관계는 FK 가 없어도 소스 쿼리의 조인 조건에서 찾아 둡니다. \
             사용자가 "OO 프로젝트 DB 인덱싱해줘"라고 하면 index_project 에 그 폴더의 절대 경로를 주세요. \
             DB 접속 정보는 서버가 application.yml, .env 등에서 직접 읽으므로 비밀번호를 대신 읽어서 넘기지 마세요. \
             여러 프로젝트를 쓸 때는 각 도구의 project 인자로 지정합니다 (list_projects 로 목록 확인). \

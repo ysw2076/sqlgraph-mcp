@@ -8,6 +8,7 @@ import io.sqlgraph.core.model.ColumnRef;
 import io.sqlgraph.core.model.DbColumn;
 import io.sqlgraph.core.model.DbTable;
 import io.sqlgraph.core.model.ExtractedSql;
+import io.sqlgraph.core.model.JoinRef;
 import io.sqlgraph.core.model.SchemaSnapshot;
 import io.sqlgraph.core.model.TableRef;
 import io.sqlgraph.core.spi.SchemaSource;
@@ -75,6 +76,7 @@ public final class Indexer {
             }
         }
         Map<String, Set<String>> columnIndex = buildColumnIndex(snapshots);
+        Map<String, Set<String>> pkIndex = buildPkIndex(snapshots);
 
         // 2. 소스 스캔
         List<IndexedStmt> stmts = new ArrayList<>();
@@ -109,7 +111,7 @@ public final class Indexer {
                         boolean found = false;
                         for (SqlExtractor x : applicable) {
                             for (ExtractedSql es : x.extract(relStr, content)) {
-                                stmts.add(new IndexedStmt(es, resolve(analyzer.analyze(es.sql()), columnIndex)));
+                                stmts.add(new IndexedStmt(es, resolve(analyzer.analyze(es.sql()), columnIndex, pkIndex)));
                                 found = true;
                             }
                         }
@@ -160,38 +162,77 @@ public final class Indexer {
         return idx;
     }
 
-    /**
-     * 테이블이 지정되지 않은 컬럼(WHERE EMP_NO = ? 처럼)을 DB 메타데이터로 해석한다.
-     * 쿼리의 테이블 중 그 컬럼을 가진 테이블이 하나뿐이면 그 테이블로 확정한다.
-     */
-    static AnalyzedSql resolve(AnalyzedSql a, Map<String, Set<String>> columnIndex) {
-        if (columnIndex.isEmpty() || a.columns().isEmpty()) return a;
-        List<String> stmtTables = a.tables().stream().map(TableRef::name).distinct().toList();
-        List<ColumnRef> out = new ArrayList<>(a.columns().size());
-        boolean changed = false;
-        for (ColumnRef c : a.columns()) {
-            if (c.table() != null) {
-                out.add(c);
-                continue;
-            }
-            String ck = Names.key(c.column());
-            String found = null;
-            int hits = 0;
-            for (String t : stmtTables) {
-                Set<String> cols = columnIndex.get(Names.key(t));
-                if (cols != null && cols.contains(ck)) {
-                    found = t;
-                    hits++;
+    /** 테이블명(키) → PK 컬럼명(키) 집합 */
+    private static Map<String, Set<String>> buildPkIndex(List<SchemaSnapshot> snapshots) {
+        Map<String, Set<String>> idx = new HashMap<>();
+        for (SchemaSnapshot s : snapshots) {
+            for (DbTable t : s.tables()) {
+                for (DbColumn c : t.columns()) {
+                    if (c.primaryKey()) idx.computeIfAbsent(Names.key(t.name()), k -> new HashSet<>()).add(Names.key(c.name()));
                 }
             }
-            if (hits == 1) {
-                out.add(c.withTable(found));
-                changed = true;
-            } else {
-                out.add(c);
+        }
+        return idx;
+    }
+
+    /**
+     * 1) 테이블이 지정되지 않은 컬럼(WHERE EMP_NO = ? 처럼)을 DB 메타데이터로 해석한다.
+     *    쿼리의 테이블 중 그 컬럼을 가진 테이블이 하나뿐이면 그 테이블로 확정한다.
+     * 2) 조인 관계를 정리한다: 양쪽 테이블이 이 쿼리의 실제 테이블이어야 하고(서브쿼리 별칭 제외),
+     *    "컬럼 = 상수" 조건은 그 컬럼이 테이블 PK 의 일부일 때만 남긴다 (공통코드 GRP_CD='POS' 패턴).
+     */
+    static AnalyzedSql resolve(AnalyzedSql a, Map<String, Set<String>> columnIndex, Map<String, Set<String>> pkIndex) {
+        List<String> stmtTables = a.tables().stream().map(TableRef::name).distinct().toList();
+        List<ColumnRef> cols = a.columns();
+        if (!columnIndex.isEmpty() && !cols.isEmpty()) {
+            List<ColumnRef> out = new ArrayList<>(cols.size());
+            for (ColumnRef c : cols) {
+                String t = c.table() != null ? null : uniqueOwner(c.column(), stmtTables, columnIndex);
+                out.add(t == null ? c : c.withTable(t));
+            }
+            cols = out;
+        }
+        Set<String> real = new HashSet<>();
+        for (String t : stmtTables) real.add(Names.key(t));
+        List<JoinRef> joins = new ArrayList<>();
+        for (JoinRef j : a.joins()) {
+            String lt = j.leftTable() != null ? j.leftTable() : uniqueOwner(j.leftColumn(), stmtTables, columnIndex);
+            String rt = j.rightTable() != null ? j.rightTable() : uniqueOwner(j.rightColumn(), stmtTables, columnIndex);
+            if (lt == null || rt == null) continue;
+            if (!real.contains(Names.key(lt)) || !real.contains(Names.key(rt))) continue;
+            boolean bothUnqualified = j.leftTable() == null && j.rightTable() == null;
+            if (Names.key(lt).equals(Names.key(rt)) && bothUnqualified) continue;   // 한 테이블 안의 컬럼 비교
+            joins.add(new JoinRef(lt, j.leftColumn(), rt, j.rightColumn(),
+                    pkLiterals(lt, j.leftColumn(), j.leftLiterals(), pkIndex),
+                    pkLiterals(rt, j.rightColumn(), j.rightLiterals(), pkIndex)));
+        }
+        return a.withColumnsAndJoins(cols, joins);
+    }
+
+    private static String uniqueOwner(String column, List<String> tables, Map<String, Set<String>> columnIndex) {
+        String ck = Names.key(column);
+        String found = null;
+        int hits = 0;
+        for (String t : tables) {
+            Set<String> cs = columnIndex.get(Names.key(t));
+            if (cs != null && cs.contains(ck)) {
+                found = t;
+                hits++;
             }
         }
-        return changed ? new AnalyzedSql(a.kind(), a.parsed(), a.error(), a.tables(), out, a.selectsAll()) : a;
+        return hits == 1 ? found : null;
+    }
+
+    private static List<String> pkLiterals(String table, String joinCol, List<String> lits, Map<String, Set<String>> pkIndex) {
+        Set<String> pk = pkIndex.get(Names.key(table));
+        if (pk == null || lits.isEmpty()) return List.of();
+        String jc = Names.key(joinCol);
+        List<String> out = new ArrayList<>();
+        for (String l : lits) {
+            String col = l.substring(0, l.indexOf('='));
+            if (!col.equals(jc) && pk.contains(col) && !out.contains(l)) out.add(l);
+        }
+        return out;
     }
 
     private static List<PathMatcher> matchers(List<String> globs) {

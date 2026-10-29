@@ -161,4 +161,37 @@ class SqlAnalyzerTest {
         assertEquals("PAY", b.tables().get(0).schema());
         assertEquals("PAY_MONTH", b.tables().get(0).name());
     }
+
+    private static Set<String> joinKeys(AnalyzedSql a) {
+        return a.joins().stream().map(j -> {
+            String l = j.leftTable() + "." + j.leftColumn();
+            String r = j.rightTable() + "." + j.rightColumn();
+            return l.compareTo(r) <= 0 ? l + "=" + r : r + "=" + l;
+        }).collect(Collectors.toSet());
+    }
+
+    @Test
+    void joinsFromOnClauses() {
+        AnalyzedSql a = an.analyze("""
+                SELECT e.EMP_NO FROM HR_EMP e
+                LEFT JOIN HR_DEPT d ON d.DEPT_CD = e.DEPT_CD
+                LEFT JOIN CM_CODE c ON c.GRP_CD = 'POS' AND c.CD = e.POS_CD
+                WHERE e.RETIRE_YN = 'N' AND e.EMP_NO = ?""");
+        assertEquals(Set.of("HR_DEPT.DEPT_CD=HR_EMP.DEPT_CD", "CM_CODE.CD=HR_EMP.POS_CD"), joinKeys(a));
+        var code = a.joins().stream().filter(j -> j.leftTable().equals("CM_CODE") || j.rightTable().equals("CM_CODE")).findFirst().orElseThrow();
+        var codeLits = code.leftTable().equals("CM_CODE") ? code.leftLiterals() : code.rightLiterals();
+        assertTrue(codeLits.contains("GRP_CD='POS'"), "공통코드 상수 조건 후보");
+    }
+
+    @Test
+    void joinsFromOracleWhereAndSelfJoinAndSubquery() {
+        assertEquals(Set.of("PAY_ITEM.PAY_YM=PAY_MONTH.PAY_YM", "PAY_ITEM.EMP_NO=PAY_MONTH.EMP_NO"), joinKeys(an.analyze(
+                "SELECT 1 FROM PAY_MONTH M, PAY_ITEM I WHERE M.PAY_YM = I.PAY_YM(+) AND M.EMP_NO = I.EMP_NO(+)")));
+        assertEquals(Set.of("HR_DEPT.DEPT_CD=HR_DEPT.UPPER_DEPT_CD"), joinKeys(an.analyze(
+                "SELECT 1 FROM HR_DEPT d1 JOIN HR_DEPT d2 ON d1.UPPER_DEPT_CD = d2.DEPT_CD")));
+        assertEquals(Set.of("HR_APPNT.EMP_NO=HR_EMP.EMP_NO"), joinKeys(an.analyze("""
+                UPDATE HR_EMP e SET e.RETIRE_YN = 'Y'
+                WHERE NOT EXISTS (SELECT 1 FROM HR_APPNT a WHERE a.EMP_NO = e.EMP_NO)""")));
+        assertTrue(an.analyze("SELECT 1 FROM T a WHERE a.X = a.Y").joins().isEmpty(), "같은 별칭 안 비교는 관계 아님");
+    }
 }

@@ -54,7 +54,7 @@ public final class Tools {
                     p.set("limit", prop("integer", "최대 결과 수 (기본 20)"));
                 }), "keyword"));
         tools.add(tool("describe_table",
-                "테이블의 컬럼(타입, PK, NULL 여부, 코멘트), FK, 그리고 이 테이블을 사용하는 쿼리 목록"
+                "테이블의 컬럼(타입, PK, NULL 여부, 코멘트), 관계(FK + 쿼리 조인 조건에서 찾은 관계), 그리고 이 테이블을 사용하는 쿼리 목록"
                         + "(MyBatis Mapper id, 파일:줄, 읽기/쓰기)을 보여줍니다.",
                 props(p -> {
                     p.set("table", prop("string", "테이블명 (SCHEMA.TABLE 형식도 가능)"));
@@ -79,6 +79,17 @@ public final class Tools {
                     p.set("limit", prop("integer", "최대 결과 수 (기본 10)"));
                     p.set("full_sql", prop("boolean", "SQL 전체 표시 (기본 false: 600자까지)"));
                 }), "keyword"));
+        tools.add(tool("find_join_path",
+                "두 테이블을 어떻게 조인하는지 찾아 FROM/JOIN/ON SQL 로 보여줍니다. DB 에 FK 가 없어도 소스 쿼리의 "
+                        + "조인 조건(공통코드 GRP_CD='..' 같은 고정 조건 포함)을 근거로 경로를 찾습니다. "
+                        + "예: 'HR_APPNT 에서 CM_CODE 까지 어떻게 조인해?'",
+                props(p -> {
+                    p.set("from", prop("string", "시작 테이블"));
+                    p.set("to", prop("string", "도착 테이블"));
+                    p.set("max_hops", prop("integer", "최대 단계 수 (기본 4)"));
+                    p.set("project", PROJECT_PROP);
+                }), "from"));
+        ((ObjectNode) tools.get(tools.size() - 1).get("inputSchema")).withArray("required").add("to");
         tools.add(tool("index_status",
                 "인덱스 상태: 마지막 인덱싱 시각, 연결한 DB, 테이블/쿼리 수, 파싱 실패 샘플, DB 메타데이터에 없는 테이블 목록.",
                 props(p -> p.set("project", PROJECT_PROP)), null));
@@ -132,6 +143,7 @@ public final class Tools {
             case "find_query" -> findQuery(svc(a), req(a, "keyword"), a.path("limit").asInt(10),
                     a.path("full_sql").asBoolean(false));
             case "index_status" -> status(svc(a));
+            case "find_join_path" -> findJoinPath(svc(a), req(a, "from"), req(a, "to"), a.path("max_hops").asInt(4));
             default -> throw new IllegalArgumentException("알 수 없는 도구: " + name);
         };
     }
@@ -190,10 +202,13 @@ public final class Tools {
                 return sb.toString();
             }
             sb.append("## ").append(table).append("\n\nDB 메타데이터에는 없지만 쿼리에서 사용됩니다 ")
-                    .append("(다른 DB, 동의어/뷰, 오타 가능성).\n\n");
+                    .append("(다른 DB, 동의어/뷰, 오타 가능성).\n");
+            appendRelations(sb, Relations.load(st), table, 15);
+            sb.append('\n');
             appendStmts(sb, st.stmtsForTable(table, queryLimit), used, st.accessCounts(table));
             return sb.toString();
         }
+        Relations rel = Relations.load(st);
         for (TableHit h : found) {
             sb.append("## ").append(qualified(h)).append("  (db: ").append(h.db()).append(", ").append(h.kind())
                     .append(")");
@@ -208,15 +223,7 @@ public final class Tools {
                         .append(" | ").append(c.nullable() ? "Y" : "N")
                         .append(" | ").append(nz(c.comment())).append(" |\n");
             }
-            var fks = st.foreignKeys(h.id());
-            if (!fks.isEmpty()) {
-                sb.append("\nFK: ");
-                sb.append(String.join(", ", fks.stream()
-                        .map(f -> f.column() + " → " + f.refTable() + "." + nz(f.refColumn())).toList()));
-                sb.append('\n');
-            }
-            var refBy = st.referencedBy(h.name());
-            if (!refBy.isEmpty()) sb.append("참조됨: ").append(String.join(", ", refBy)).append('\n');
+            appendRelations(sb, rel, h.name(), 15);
             sb.append('\n');
         }
         int total = st.countStmtsForTable(table);
@@ -239,10 +246,7 @@ public final class Tools {
             sb.append("### 사용 쿼리 ").append(total).append("건 (쓰기 ").append(ac[0]).append(" / 읽기 ").append(ac[1]).append(")\n");
             appendGrouped(sb, all);
             if (total > all.size()) sb.append("\n… 외 ").append(total - all.size()).append("건 (limit 조정)\n");
-            for (TableHit h : found) {
-                var refBy = st.referencedBy(h.name());
-                if (!refBy.isEmpty()) sb.append("\nFK 로 참조하는 테이블: ").append(String.join(", ", refBy)).append('\n');
-            }
+            appendRelations(sb, Relations.load(st), table, 20);
             appendSummary(sb, all);
             return sb.toString();
         }
@@ -314,6 +318,7 @@ public final class Tools {
         sb.append("- 테이블 ").append(c.get("tables")).append(" / 컬럼 ").append(c.get("columns")).append('\n');
         sb.append("- 쿼리 ").append(c.get("statements")).append(" (파싱 실패 ").append(c.get("parseFailed"))
                 .append(", 동적 ").append(c.get("dynamic")).append(")\n");
+        sb.append("- 쿼리 조인에서 찾은 관계 ").append(c.get("relations")).append("개\n");
         List<String> unknown = st.unknownTables(15);
         if (!unknown.isEmpty()) {
             sb.append("- DB 메타데이터에 없는 테이블 (쿼리 수): ").append(String.join(", ", unknown)).append('\n');
@@ -387,6 +392,41 @@ public final class Tools {
     }
 
     // ================================================================= format
+
+    private static void appendRelations(StringBuilder sb, Relations rel, String table, int limit) {
+        List<Relations.Pair> list = rel.forTable(table);
+        if (list.isEmpty()) return;
+        sb.append("\n관계 (FK + 쿼리 조인 근거, → 는 참조 방향):\n");
+        list.stream().limit(limit).forEach(p -> sb.append("- ").append(rel.describe(p)).append('\n'));
+        if (list.size() > limit) sb.append("… 외 ").append(list.size() - limit).append("건\n");
+    }
+
+    String findJoinPath(SqlGraphService svc, String from, String to, int maxHops) throws Exception {
+        Relations rel = Relations.load(svc.store());
+        int hops = clamp(maxHops, 1, 6);
+        List<List<Relations.Step>> paths = rel.paths(from, to, hops, 3);
+        if (paths.isEmpty()) {
+            boolean f = !rel.forTable(from).isEmpty();
+            boolean t = !rel.forTable(to).isEmpty();
+            String why;
+            if (!f) why = from + " 에 연결된 관계가 없습니다";
+            else if (!t) why = to + " 에 연결된 관계가 없습니다";
+            else if (hops < 8 && !rel.paths(from, to, 8, 1).isEmpty()) why = hops + "단계 안에는 경로가 없습니다 (max_hops 를 늘려 보세요)";
+            else why = "두 테이블을 잇는 관계가 없습니다 (다른 DB 이거나, 함께 조인하는 쿼리가 없음)";
+            return from + " → " + to + ": " + why + ". 관계는 DB 의 FK 와 소스 쿼리의 조인 조건에서 찾습니다.";
+        }
+        StringBuilder sb = new StringBuilder();
+        int n = 1;
+        for (List<Relations.Step> p : paths) {
+            sb.append("### 경로 ").append(n++).append(" (").append(p.size()).append("단계): ");
+            List<String> names = new ArrayList<>();
+            names.add(p.get(0).from());
+            p.forEach(s2 -> names.add(s2.to()));
+            sb.append(String.join(" → ", names)).append("\n```sql\n").append(Relations.toSql(p)).append("```\n");
+        }
+        sb.append("근거: FK 는 DB 제약조건, '쿼리 N건' 은 같은 조인을 쓰는 소스 쿼리 수입니다.");
+        return sb.toString();
+    }
 
     private void appendStmts(StringBuilder sb, List<StmtHit> hits, int total, int[] accessCounts) {
         if (total == 0) {

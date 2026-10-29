@@ -81,6 +81,23 @@ class EndToEndTest {
     }
 
     @Test
+    void relationsInferredFromJoinsWithoutFk() throws Exception {
+        String d = tools.call("describe_table", om.readTree("{\"table\":\"HR_EMP\",\"project\":\"hr-project\"}"));
+        assertTrue(d.contains("HR_EMP.POS_CD → CM_CODE.CD  [CM_CODE.GRP_CD='POS']"), d);
+        assertTrue(d.contains("HR_EMP.DEPT_CD → HR_DEPT.DEPT_CD  (FK · 쿼리"), "FK 와 쿼리 근거 합침: " + d);
+        assertFalse(d.contains("RETIRE_YN='N'"), "PK 가 아닌 상수 조건은 관계 조건이 아님");
+
+        String p = tools.call("find_join_path", om.readTree("{\"from\":\"HR_APPNT\",\"to\":\"CM_CODE\",\"project\":\"hr-project\"}"));
+        assertTrue(p.contains("JOIN CM_CODE cc ON cc.CD = ha.APPNT_TYPE_CD AND cc.GRP_CD = 'APPNT'"), p);
+
+        String two = tools.call("find_join_path", om.readTree("{\"from\":\"HR_APPNT\",\"to\":\"HR_DEPT\",\"project\":\"hr-project\"}"));
+        assertTrue(two.contains("(1단계)"), "HR_APPNT.AFT_DEPT_CD/BEF_DEPT_CD → HR_DEPT 직접 관계: " + two);
+
+        String none = tools.call("find_join_path", om.readTree("{\"from\":\"HR_EMP\",\"to\":\"PAY_MONTH\",\"project\":\"hr-project\"}"));
+        assertTrue(none.contains("잇는 관계가 없습니다"), none);
+    }
+
+    @Test
     void findQueryByMapperId() throws Exception {
         String out = tools.call("find_query", om.readTree("{\"keyword\":\"mergePayMonth\",\"project\":\"hr-project\"}"));
         assertTrue(out.contains("MERGE INTO PAY_MONTH"));
@@ -143,7 +160,7 @@ class EndToEndTest {
         assertEquals(5, res.size(), "알림에는 응답하지 않는다");
         assertEquals("2025-06-18", res.get(0).at("/result/protocolVersion").asText());
         assertEquals("sqlgraph-mcp", res.get(0).at("/result/serverInfo/name").asText());
-        assertEquals(7, res.get(1).at("/result/tools").size());
+        assertEquals(8, res.get(1).at("/result/tools").size());
         assertTrue(res.get(2).at("/result/content/0/text").asText().contains("PAY_MONTH"));
         assertFalse(res.get(2).at("/result/isError").asBoolean());
         assertTrue(res.get(3).at("/result/isError").asBoolean(), "필수 인자 누락은 도구 오류");

@@ -4,8 +4,12 @@ import io.sqlgraph.core.Names;
 import io.sqlgraph.core.model.Access;
 import io.sqlgraph.core.model.AnalyzedSql;
 import io.sqlgraph.core.model.ColumnRef;
+import io.sqlgraph.core.model.JoinRef;
 import io.sqlgraph.core.model.SqlKind;
 import io.sqlgraph.core.model.TableRef;
+import net.sf.jsqlparser.expression.LongValue;
+import net.sf.jsqlparser.expression.StringValue;
+import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
@@ -68,7 +72,7 @@ public final class SqlAnalyzer {
         String cleaned = normalize(sql);
         if (SqlKind.guess(cleaned) == SqlKind.CALL) {
             // 프로시저 호출은 테이블을 직접 참조하지 않는다 (본문은 DB 쪽). 파싱 실패로 세지 않음
-            return new AnalyzedSql(SqlKind.CALL, true, null, List.of(), List.of(), false);
+            return new AnalyzedSql(SqlKind.CALL, true, null, List.of(), List.of(), false, List.of());
         }
         try {
             Statement st = CCJSqlParserUtil.parse(cleaned, p -> p.withTimeOut(PARSE_TIMEOUT_MS));
@@ -199,7 +203,66 @@ public final class SqlAnalyzer {
             tables.stream().filter(t -> Names.key(t.name()).equals(tk)).findFirst()
                     .ifPresent(t -> tables.add(new TableRef(t.schema(), t.name(), Access.WRITE)));
         }
-        return new AnalyzedSql(kind, true, null, List.copyOf(tables), List.copyOf(columns), c.selectsAll);
+        return new AnalyzedSql(kind, true, null, List.copyOf(tables), List.copyOf(columns), c.selectsAll,
+                joins(c, aliasToTable, single));
+    }
+
+    /**
+     * 컬럼 = 컬럼 조건을 관계로. 같은 별칭끼리(a.X = a.Y)와 같은 컬럼 자기 자신은 제외.
+     * 셀프 조인(d1.UPPER_DEPT_CD = d2.DEPT_CD)은 별칭이 다르면 포함한다.
+     */
+    private static List<JoinRef> joins(Collector c, Map<String, String> aliasToTable, String single) {
+        // 별칭(또는 테이블) 키별 "컬럼 = 상수" 조건
+        Map<String, List<String>> literals = new HashMap<>();
+        for (EqualsTo eq : c.equalities) {
+            Column col = null;
+            String val = null;
+            if (eq.getLeftExpression() instanceof Column l) {
+                col = l;
+                val = literal(eq.getRightExpression());
+            }
+            if (val == null && eq.getRightExpression() instanceof Column r) {
+                col = r;
+                val = literal(eq.getLeftExpression());
+            }
+            if (col == null || val == null) continue;
+            String q = qualifierKey(col, single);
+            if (q == null) continue;
+            literals.computeIfAbsent(q, k -> new ArrayList<>())
+                    .add(Names.key(Names.unquote(col.getColumnName())) + "=" + val);
+        }
+        LinkedHashSet<JoinRef> out = new LinkedHashSet<>();
+        for (EqualsTo eq : c.equalities) {
+            if (!(eq.getLeftExpression() instanceof Column l) || !(eq.getRightExpression() instanceof Column r)) continue;
+            String lq = qualifierKey(l, null);
+            String rq = qualifierKey(r, null);
+            String lc = Names.unquote(l.getColumnName());
+            String rc = Names.unquote(r.getColumnName());
+            if (lc == null || rc == null || lc.contains(DYN) || rc.contains(DYN)) continue;
+            if (PSEUDO_COLUMNS.contains(Names.key(lc)) || PSEUDO_COLUMNS.contains(Names.key(rc))) continue;
+            if (lq != null && lq.equals(rq)) continue;            // 같은 별칭 안의 비교
+            String lt = lq == null ? null : aliasToTable.getOrDefault(lq, Names.unquote(l.getTable().getName()));
+            String rt = rq == null ? null : aliasToTable.getOrDefault(rq, Names.unquote(r.getTable().getName()));
+            if (lt != null && lt.equalsIgnoreCase(String.valueOf(rt)) && lc.equalsIgnoreCase(rc)) continue;
+            out.add(new JoinRef(lt, lc, rt, rc,
+                    lq == null ? List.of() : List.copyOf(literals.getOrDefault(lq, List.of())),
+                    rq == null ? List.of() : List.copyOf(literals.getOrDefault(rq, List.of()))));
+        }
+        return List.copyOf(out);
+    }
+
+    /** 컬럼의 한정자(별칭/테이블명) 키. 없으면 단일 테이블 쿼리일 때만 그 테이블 */
+    private static String qualifierKey(Column col, String single) {
+        Table t = col.getTable();
+        if (t != null && t.getName() != null) return Names.key(t.getName());
+        return single == null ? null : Names.key(single);
+    }
+
+    /** 문자열/숫자 상수면 SQL 표기로, 아니면 null (바인드 변수 ? 는 상수가 아님) */
+    private static String literal(Object e) {
+        if (e instanceof StringValue sv) return "'" + sv.getValue() + "'";
+        if (e instanceof LongValue lv) return lv.getStringValue();
+        return null;
     }
 
     private static ColumnRef toRef(Column col, Access acc, Map<String, String> aliasToTable,
@@ -235,7 +298,14 @@ public final class SqlAnalyzer {
     private static final class Collector extends TablesNamesFinder {
         final List<Table> tables = new ArrayList<>();
         final List<Column> columns = new ArrayList<>();
+        final List<EqualsTo> equalities = new ArrayList<>();
         boolean selectsAll;
+
+        @Override
+        public void visit(EqualsTo equalsTo) {
+            equalities.add(equalsTo);
+            super.visit(equalsTo);
+        }
 
         @Override
         public void visit(Table table) {
@@ -283,7 +353,7 @@ public final class SqlAnalyzer {
             tables.add(new TableRef(schema, name, acc));
         }
         boolean star = Pattern.compile("(?i)SELECT\\s+(DISTINCT\\s+)?\\*").matcher(noComments).find();
-        return new AnalyzedSql(kind, false, error, List.copyOf(tables), List.of(), star);
+        return new AnalyzedSql(kind, false, error, List.copyOf(tables), List.of(), star, List.of());
     }
 
     private static String shortError(Throwable e) {

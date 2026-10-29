@@ -7,6 +7,7 @@ import io.sqlgraph.core.model.DbColumn;
 import io.sqlgraph.core.model.DbTable;
 import io.sqlgraph.core.model.ExtractedSql;
 import io.sqlgraph.core.model.ForeignKey;
+import io.sqlgraph.core.model.JoinRef;
 import io.sqlgraph.core.model.SchemaSnapshot;
 import io.sqlgraph.core.model.TableRef;
 
@@ -46,7 +47,10 @@ public final class GraphStore implements AutoCloseable {
 
     public record FkInfo(String column, String refTable, String refColumn) {}
 
-    private static final int SCHEMA_VERSION = 1;
+    /** 쿼리 조인에서 찾은 관계 (t1.c1 = t2.c2 [cond]) 와 근거 쿼리 수 */
+    public record Relation(String t1, String c1, String t2, String c2, String cond, int count) {}
+
+    private static final int SCHEMA_VERSION = 2;
     private final Connection conn;
 
     private GraphStore(Connection conn) {
@@ -110,6 +114,11 @@ public final class GraphStore implements AutoCloseable {
                   stmt_id INTEGER, tbl_key TEXT, col_key TEXT, access TEXT)""");
             s.execute("CREATE INDEX IF NOT EXISTS ix_stmt_col ON stmt_col(tbl_key, col_key)");
             s.execute("CREATE INDEX IF NOT EXISTS ix_stmt_col2 ON stmt_col(col_key)");
+            s.execute("""
+                CREATE TABLE IF NOT EXISTS stmt_join(
+                  stmt_id INTEGER, t1 TEXT, c1 TEXT, t2 TEXT, c2 TEXT, cond TEXT)""");
+            s.execute("CREATE INDEX IF NOT EXISTS ix_join_t1 ON stmt_join(t1)");
+            s.execute("CREATE INDEX IF NOT EXISTS ix_join_t2 ON stmt_join(t2)");
         }
         setMeta("schema_version", String.valueOf(SCHEMA_VERSION));
     }
@@ -122,7 +131,7 @@ public final class GraphStore implements AutoCloseable {
         boolean auto = conn.getAutoCommit();
         conn.setAutoCommit(false);
         try (Statement s = conn.createStatement()) {
-            for (String t : List.of("db", "tbl", "col", "fk", "stmt", "stmt_tbl", "stmt_col")) {
+            for (String t : List.of("db", "tbl", "col", "fk", "stmt", "stmt_tbl", "stmt_col", "stmt_join")) {
                 s.execute("DELETE FROM " + t);
             }
             writeSchemas(snapshots);
@@ -199,7 +208,9 @@ public final class GraphStore implements AutoCloseable {
              PreparedStatement pt = conn.prepareStatement(
                      "INSERT INTO stmt_tbl(stmt_id, schema_key, tbl_key, access) VALUES(?,?,?,?)");
              PreparedStatement pc = conn.prepareStatement(
-                     "INSERT INTO stmt_col(stmt_id, tbl_key, col_key, access) VALUES(?,?,?,?)")) {
+                     "INSERT INTO stmt_col(stmt_id, tbl_key, col_key, access) VALUES(?,?,?,?)");
+             PreparedStatement pj = conn.prepareStatement(
+                     "INSERT INTO stmt_join(stmt_id, t1, c1, t2, c2, cond) VALUES(?,?,?,?,?,?)")) {
             long id = 0;
             for (IndexedStmt is : stmts) {
                 ExtractedSql src = is.source();
@@ -230,11 +241,33 @@ public final class GraphStore implements AutoCloseable {
                     pc.setString(4, c.access().name());
                     pc.addBatch();
                 }
+                java.util.Set<String> seen = new java.util.HashSet<>();
+                for (JoinRef j : an.joins()) {
+                    String[] n = normalize(j);
+                    if (!seen.add(String.join("|", n))) continue;
+                    pj.setLong(1, id);
+                    for (int i = 0; i < 5; i++) pj.setString(i + 2, n[i]);
+                    pj.addBatch();
+                }
             }
             ps.executeBatch();
             pt.executeBatch();
             pc.executeBatch();
+            pj.executeBatch();
         }
+    }
+
+    /** 양쪽 순서를 정렬하고 상수 조건을 "TABLE.COL='V'" 로 묶는다: {t1, c1, t2, c2, cond} */
+    static String[] normalize(JoinRef j) {
+        String lt = Names.key(j.leftTable()), lc = Names.key(j.leftColumn());
+        String rt = Names.key(j.rightTable()), rc = Names.key(j.rightColumn());
+        List<String> conds = new ArrayList<>();
+        for (String l : j.leftLiterals()) conds.add(lt + "." + l);
+        for (String l : j.rightLiterals()) conds.add(rt + "." + l);
+        java.util.Collections.sort(conds);
+        String cond = conds.isEmpty() ? "" : String.join(" AND ", conds);
+        if ((lt + "." + lc).compareTo(rt + "." + rc) <= 0) return new String[]{lt, lc, rt, rc, cond};
+        return new String[]{rt, rc, lt, lc, cond};
     }
 
     public void setMeta(String k, String v) throws SQLException {
@@ -263,6 +296,7 @@ public final class GraphStore implements AutoCloseable {
         m.put("statements", count("SELECT COUNT(*) FROM stmt"));
         m.put("parseFailed", count("SELECT COUNT(*) FROM stmt WHERE parsed = 0"));
         m.put("dynamic", count("SELECT COUNT(*) FROM stmt WHERE dynamic = 1"));
+        m.put("relations", count("SELECT COUNT(*) FROM (SELECT DISTINCT t1, c1, t2, c2, cond FROM stmt_join)"));
         m.put("unknownTables", count("""
                 SELECT COUNT(DISTINCT st.tbl_key) FROM stmt_tbl st
                 WHERE NOT EXISTS (SELECT 1 FROM tbl t WHERE t.name_key = st.tbl_key)"""));
@@ -519,6 +553,75 @@ public final class GraphStore implements AutoCloseable {
                     r.add(rs.getString(1) + (acc != null && acc.contains("WRITE") ? "(W)" : "(R)"));
                 }
             }
+        }
+        return r;
+    }
+
+    /** 이 테이블이 들어간 조인 관계 (근거 쿼리 많은 순) */
+    public List<Relation> relationsFor(String tableName, int limit) throws SQLException {
+        String k = Names.key(Names.lastPart(tableName));
+        return relations("WHERE t1 = ? OR t2 = ?", limit, k, k);
+    }
+
+    /** 전체 조인 관계 (경로 탐색용) */
+    public List<Relation> allRelations() throws SQLException {
+        return relations("", 100_000);
+    }
+
+    private List<Relation> relations(String where, int limit, String... params) throws SQLException {
+        String sql = "SELECT t1, c1, t2, c2, cond, COUNT(DISTINCT stmt_id) n FROM stmt_join " + where
+                + " GROUP BY t1, c1, t2, c2, cond ORDER BY n DESC, t1, t2 LIMIT ?";
+        List<Relation> r = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            int i = 1;
+            for (String p : params) ps.setString(i++, p);
+            ps.setInt(i, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    r.add(new Relation(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4),
+                            rs.getString(5), rs.getInt(6)));
+                }
+            }
+        }
+        return r;
+    }
+
+    /** 관계의 근거 쿼리 (ownerId) 몇 개 */
+    public List<String> relationEvidence(Relation rel, int limit) throws SQLException {
+        List<String> r = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement("""
+                SELECT DISTINCT s.owner FROM stmt_join j JOIN stmt s ON s.id = j.stmt_id
+                WHERE j.t1 = ? AND j.c1 = ? AND j.t2 = ? AND j.c2 = ? AND j.cond = ?
+                ORDER BY s.owner LIMIT ?""")) {
+            ps.setString(1, rel.t1());
+            ps.setString(2, rel.c1());
+            ps.setString(3, rel.t2());
+            ps.setString(4, rel.c2());
+            ps.setString(5, rel.cond());
+            ps.setInt(6, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) r.add(rs.getString(1));
+            }
+        }
+        return r;
+    }
+
+    /** 모든 FK: {테이블, 컬럼, 참조 테이블, 참조 컬럼} (키는 대문자) */
+    public List<String[]> allForeignKeys() throws SQLException {
+        List<String[]> r = new ArrayList<>();
+        try (Statement s = conn.createStatement(); ResultSet rs = s.executeQuery(
+                "SELECT t.name_key, UPPER(f.col), UPPER(f.ref_table), UPPER(f.ref_col) FROM fk f JOIN tbl t ON t.id = f.tbl_id")) {
+            while (rs.next()) r.add(new String[]{rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4)});
+        }
+        return r;
+    }
+
+    /** PK 컬럼 집합: "TABLE.COL" (대문자) */
+    public java.util.Set<String> primaryKeyColumns() throws SQLException {
+        java.util.Set<String> r = new java.util.HashSet<>();
+        try (Statement s = conn.createStatement(); ResultSet rs = s.executeQuery(
+                "SELECT t.name_key, c.name_key FROM col c JOIN tbl t ON t.id = c.tbl_id WHERE c.pk = 1")) {
+            while (rs.next()) r.add(rs.getString(1) + "." + rs.getString(2));
         }
         return r;
     }
