@@ -35,8 +35,13 @@ final class Relations {
         }
     }
 
-    /** 경로의 한 단계: from 에서 to 로 가는 조인 컬럼들 */
-    record Step(String from, String to, List<Pair> pairs) {
+    /**
+     * 경로의 한 단계: from 에서 to 로 가는 조인 컬럼들.
+     *
+     * @param alternatives 같은 대상 컬럼으로 가는 다른 조인 컬럼 (예: BEF_DEPT_CD / AFT_DEPT_CD → DEPT_CD).
+     *                     복합키가 아니라 의미가 다른 별개 관계이므로 AND 로 묶지 않고 따로 알려 준다
+     */
+    record Step(String from, String to, List<Pair> pairs, List<Pair> alternatives) {
         int score() {
             int s = 0;
             for (Pair p : pairs) s = Math.max(s, (p.fk ? 100 : 0) + p.count);
@@ -117,21 +122,31 @@ final class Relations {
         return adj;
     }
 
-    /** 두 테이블 사이에 쓸 컬럼 쌍: FK + 근거가 가장 많은 쌍의 절반 이상 */
-    private static List<Pair> chooseColumns(List<Pair> cands) {
-        int max = cands.stream().mapToInt(Pair::count).max().orElse(0);
-        List<Pair> out = new ArrayList<>();
-        for (Pair p : cands) {
-            if (p.fk || p.count >= Math.max(1, (max + 1) / 2)) out.add(p);
+    /**
+     * 두 테이블 사이에 쓸 컬럼 쌍.
+     * 복합키처럼 서로 다른 컬럼끼리 이어지는 쌍은 함께 쓰고(AND), 한쪽 컬럼이 겹치는 쌍은 의미가 다른
+     * 별개 관계로 보고 가장 강한 것 하나만 쓴다 (나머지는 alternatives).
+     */
+    private static Step chooseColumns(String from, String to, List<Pair> cands) {
+        List<Pair> sorted = new ArrayList<>(cands);
+        sorted.sort(Comparator.comparingInt((Pair p) -> -((p.fk ? 100 : 0) + p.count)));
+        int max = sorted.isEmpty() ? 0 : sorted.get(0).count;
+        List<Pair> chosen = new ArrayList<>();
+        List<Pair> alts = new ArrayList<>();
+        Set<String> usedFrom = new HashSet<>();
+        Set<String> usedTo = new HashSet<>();
+        for (Pair p : sorted) {
+            boolean strong = p.fk || p.count >= Math.max(1, (max + 1) / 2);
+            boolean overlaps = usedFrom.contains(p.ca) || usedTo.contains(p.cb);
+            if (strong && !overlaps) {
+                chosen.add(p);
+                usedFrom.add(p.ca);
+                usedTo.add(p.cb);
+            } else if (overlaps && !(usedFrom.contains(p.ca) && usedTo.contains(p.cb))) {
+                alts.add(p);
+            }
         }
-        // 같은 컬럼 쌍이 조건만 다르게 여러 개면 근거 많은 것 하나만
-        Map<String, Pair> best = new LinkedHashMap<>();
-        for (Pair p : out) {
-            String k = p.ca + "=" + p.cb;
-            Pair b = best.get(k);
-            if (b == null || p.count > b.count) best.put(k, p);
-        }
-        return new ArrayList<>(best.values());
+        return new Step(from, to, chosen, alts);
     }
 
     /** 홉 수가 가장 적은 경로들 중 근거가 강한 순으로 최대 limit 개 */
@@ -167,7 +182,7 @@ final class Relations {
             List<Step> steps = new ArrayList<>();
             for (int i = 0; i + 1 < r.size(); i++) {
                 String a = r.get(i), b = r.get(i + 1);
-                steps.add(new Step(a, b, chooseColumns(adj.get(a).get(b))));
+                steps.add(chooseColumns(a, b, adj.get(a).get(b)));
             }
             out.add(steps);
         }
@@ -224,6 +239,12 @@ final class Relations {
             if (cnt > 0) src.add("쿼리 " + cnt + "건");
             sb.append("JOIN ").append(st.to()).append(' ').append(ta).append(" ON ")
                     .append(String.join(" AND ", on)).append("   -- ").append(String.join(" · ", src)).append('\n');
+            if (!st.alternatives().isEmpty()) {
+                sb.append("   -- 다른 조인 컬럼(별개 관계): ");
+                sb.append(String.join(", ", st.alternatives().stream()
+                        .map(p -> ta + "." + p.cb + " = " + fa + "." + p.ca + (p.count > 0 ? " (쿼리 " + p.count + "건)" : "")).toList()));
+                sb.append('\n');
+            }
         }
         return sb.toString();
     }

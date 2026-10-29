@@ -88,3 +88,31 @@ jobs:
             # Java 가 이미 있는 사용자용 단일 jar
             gh release upload "$TAG" server/build/libs/sqlgraph-mcp-*-all.jar --clobber
           fi
+
+  # NPM_TOKEN 시크릿이 있으면 npm 에 배포 (없으면 건너뜀)
+  #   저장소 Settings → Secrets and variables → Actions → New repository secret → NPM_TOKEN
+  npm-publish:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: npm
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::notice::NPM_TOKEN 시크릿이 없어 npm 배포를 건너뜁니다"
+            exit 0
+          fi
+          VERSION="${TAG#v}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          if npm view "sqlgraph-mcp@$VERSION" version >/dev/null 2>&1; then
+            echo "::notice::sqlgraph-mcp@$VERSION 은 이미 npm 에 있습니다"
+          else
+            npm publish --access public
+          fi

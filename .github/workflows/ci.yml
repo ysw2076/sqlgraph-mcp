@@ -26,6 +26,11 @@ jobs:
           distribution: temurin
           java-version: '25'
           cache: gradle
+      - name: Check npm launcher
+        run: |
+          node --check npm/lib/launcher.js
+          node --check npm/bin/sqlgraph-mcp.js
+          node -e "const l=require('./npm/lib/launcher'); console.log('npm launcher', l.VERSION, l.platformAsset())"
       - name: Build and test
         run: |
           set -o pipefail

@@ -39,9 +39,18 @@ Claude Code 를 새로 열고 `/mcp` 에서 `sqlgraph` 가 connected 인지 확�
 > SQLGRAPH_ZIP=~/Downloads/sqlgraph-mcp-macos-arm64.zip sh install.sh
 > ```
 
+**npm (Node.js 18+)**
+```bash
+npx -y sqlgraph-mcp install          # 설치 없이 바로 Claude Code 에 등록
+# 또는
+npm install -g sqlgraph-mcp && sqlgraph-mcp install
+```
+처음 실행할 때 OS 에 맞는 배포 파일(Java 런타임 포함)을 `~/.sqlgraph/versions/<버전>` 에 한 번 내려받습니다.
+Claude Code 에는 `npx -y sqlgraph-mcp serve`(npx) 또는 전역 설치 경로로 등록됩니다.
+
 Java 가 이미 있다면 Releases 의 `sqlgraph-mcp-<버전>-all.jar` 하나로도 됩니다 (JDK 25 필요):
 ```bash
-java -jar sqlgraph-mcp-0.2.0-all.jar install
+java -jar sqlgraph-mcp-0.3.0-all.jar install
 ```
 
 ## 사용
@@ -55,11 +64,15 @@ Claude Code 에서 말로 하면 됩니다.
 | "HR_EMP 구조랑 쓰는 곳 보여줘" | `describe_table` |
 | "EMAIL 컬럼 길이 바꾸면 영향 범위?" | `impact_analysis` |
 | "EmpMapper.selectEmpList 쿼리 보여줘" | `find_query` |
+| "HR_APPNT 에서 CM_CODE 까지 어떻게 조인해?" | `find_join_path` |
 | "인덱싱한 프로젝트 목록" | `list_projects` |
 | "인덱스 상태 확인해줘" | `index_status` |
 
 - 여러 프로젝트를 인덱싱해 두고 이름으로 오갈 수 있습니다 ("pay-system 에서 PAY_MONTH 보여줘").
 - Mapper 나 스키마가 바뀌면 "다시 인덱싱해줘" 라고 하면 됩니다 (자동 감지는 아직 없음).
+- **FK 없는 관계**: 소스 쿼리의 조인 조건(`ON a.X = b.Y`, Oracle `(+)`, 상관 서브쿼리, 셀프 조인)에서 테이블 관계를 찾습니다.
+  공통코드처럼 PK 일부를 상수로 고정하는 조인(`c.GRP_CD = 'POS' AND c.CD = e.POS_CD`)은 조건까지 함께 기록합니다.
+  `describe_table` 에 FK·쿼리 근거 수와 참조 방향이 나오고, `find_join_path` 가 조인 SQL 을 만들어 줍니다.
 - `impact_analysis` 의 "사용 가능성 있음"은 `SELECT *`, 테이블을 특정할 수 없는 동명 컬럼, `${}` 동적 SQL, 파싱 실패 쿼리입니다.
 
 ## DB 접속 정보는 어떻게 찾나
@@ -169,7 +182,8 @@ DDL 파일 (접속 불가 환경)         iBatis 2 SqlMap XML             쿼리
 - **`<include>`**: 같은 파일의 `<sql>` 조각만 펼칩니다. 다른 Mapper 파일의 조각은 "동적"으로 표시됩니다.
 - **`${...}`**: 런타임 값이라 분석에서 제외하고 "동적"으로 표시합니다.
 - **프로시저 호출**(`{call ...}`)은 쿼리로 등록하지만 프로시저 내부 테이블은 분석하지 않습니다.
-- **FK 없는 관계**: 아직 DB 에 걸린 FK 만 관계로 보여줍니다 (조인 조건 기반 관계 추론은 다음 단계).
+- **관계 추론**: 조인 조건이 있는 쿼리가 소스에 있어야 찾습니다. 같은 대상 컬럼으로 가는 여러 관계(발령 전/후 부서 등)는
+  하나로 묶지 않고 별개 관계로 표시합니다. 프로시저 본문 안의 조인은 아직 분석하지 않습니다.
 - **지원 소스**: MyBatis/iBatis XML, `.sql`. JPA `@Query`, 코드 속 SQL 문자열, ORM 모델은 다음 단계.
 - **테이블 매칭**은 이름 기준(대소문자 무시)입니다.
 
@@ -181,8 +195,9 @@ DDL 파일 (접속 불가 환경)         iBatis 2 SqlMap XML             쿼리
 ```
 
 - JDK 25, Gradle Wrapper 9.1. 폐쇄망은 `libs/` 에 jar 를 넣고 `-Poffline` (`libs/README.md`).
-- **릴리스**: `git tag v0.2.0 && git push origin v0.2.0` → GitHub Actions(`release.yml`)가
+- **릴리스**: `v*` 태그 푸시 또는 Actions → Release → Run workflow(태그 입력) → GitHub Actions(`release.yml`)가
   Windows x64 / macOS arm64 / Linux x64 배포 zip 과 단일 jar 를 만들어 Release 에 올립니다.
+  저장소 시크릿 `NPM_TOKEN` 이 있으면 `npm/` 패키지도 같은 버전으로 npm 에 배포합니다.
 - 확장 포인트: `io.sqlgraph.core.spi.SchemaSource` (DB 입력 형식), `io.sqlgraph.core.spi.SqlExtractor` (언어·프레임워크).
 - MCP 프로토콜은 공식 SDK 없이 직접 구현했습니다 (stdio, JSON-RPC 2.0).
 - JSqlParser 4.9 를 사용합니다. 5.x 는 Visitor 시그니처가 바뀌어 `SqlAnalyzer.Collector` 를 함께 고쳐야 합니다.
@@ -192,6 +207,7 @@ core/       모델, SPI, SqlAnalyzer(JSqlParser), GraphStore(SQLite), Indexer
 connector/  JdbcSchemaSource, DdlSchemaSource, DriverResolver, detect/(설정 자동 탐지)
 extractor/  MyBatisXmlExtractor, SqlFileExtractor
 server/     MCP 서버, 도구, Workspace(여러 프로젝트), CLI, Installer, 실행 스크립트(src/launcher)
+npm/        npm 런처 (npx sqlgraph-mcp): OS 별 배포 zip 다운로드·캐시·실행
 samples/    hr-project (sqlgraph.yml + DDL), spring-hr (application.yml 자동 탐지)
 ```
 

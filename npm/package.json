@@ -1,0 +1,23 @@
+{
+  "name": "sqlgraph-mcp",
+  "version": "0.3.0",
+  "description": "DB 스키마와 소스 속 SQL(MyBatis·.sql)을 인덱싱해 Claude Code 등 AI 코딩 도구가 바로 조회하게 하는 로컬 MCP 서버",
+  "keywords": ["mcp", "model-context-protocol", "claude", "claude-code", "sql", "mybatis", "database", "schema", "impact-analysis"],
+  "homepage": "https://github.com/ysw2076/sqlgraph-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ysw2076/sqlgraph-mcp.git",
+    "directory": "npm"
+  },
+  "bugs": "https://github.com/ysw2076/sqlgraph-mcp/issues",
+  "license": "MIT",
+  "author": "ysw2076",
+  "bin": {
+    "sqlgraph-mcp": "bin/sqlgraph-mcp.js"
+  },
+  "files": ["bin", "lib", "README.md"],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": ["win32", "darwin", "linux"]
+}

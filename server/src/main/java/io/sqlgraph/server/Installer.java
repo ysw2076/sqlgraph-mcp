@@ -26,6 +26,17 @@ final class Installer {
 
     /** MCP 클라이언트가 실행할 명령 (java + 옵션 + jar + serve) */
     static List<String> serveCommand() {
+        // npm 런처는 npx / 글로벌 설치에 맞는 명령을 넘겨준다 (버전별 캐시 경로 대신 안정적인 명령으로 등록)
+        String override = System.getenv("SQLGRAPH_REGISTER_CMD");
+        if (override != null && !override.isBlank()) {
+            try {
+                List<String> cmd = new ArrayList<>();
+                for (var n : new com.fasterxml.jackson.databind.ObjectMapper().readTree(override)) cmd.add(n.asText());
+                if (!cmd.isEmpty()) return cmd;
+            } catch (Exception ignore) {
+                // 형식이 이상하면 기본 방식
+            }
+        }
         String java = ProcessHandle.current().info().command()
                 .orElse(Path.of(System.getProperty("java.home"), "bin", isWindows() ? "java.exe" : "java").toString());
         Path jar;

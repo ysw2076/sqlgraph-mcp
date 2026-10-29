@@ -92,6 +92,12 @@ class EndToEndTest {
 
         String two = tools.call("find_join_path", om.readTree("{\"from\":\"HR_APPNT\",\"to\":\"HR_DEPT\",\"project\":\"hr-project\"}"));
         assertTrue(two.contains("(1단계)"), "HR_APPNT.AFT_DEPT_CD/BEF_DEPT_CD → HR_DEPT 직접 관계: " + two);
+        assertFalse(two.contains("AFT_DEPT_CD AND") || two.contains("BEF_DEPT_CD AND"),
+                "같은 대상 컬럼으로 가는 두 관계를 AND 로 묶으면 안 됨: " + two);
+        assertTrue(two.contains("다른 조인 컬럼(별개 관계)"), two);
+
+        String comp = tools.call("find_join_path", om.readTree("{\"from\":\"PAY_ITEM\",\"to\":\"PAY_MONTH\",\"project\":\"hr-project\"}"));
+        assertTrue(comp.contains(" AND "), "복합키는 함께: " + comp);
 
         String none = tools.call("find_join_path", om.readTree("{\"from\":\"HR_EMP\",\"to\":\"PAY_MONTH\",\"project\":\"hr-project\"}"));
         assertTrue(none.contains("잇는 관계가 없습니다"), none);
