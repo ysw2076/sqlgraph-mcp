@@ -91,4 +91,78 @@ class MyBatisXmlExtractorTest {
         List<ExtractedSql> r = x.extract("logback.xml", "<configuration><root level=\"INFO\"/></configuration>");
         assertTrue(r.isEmpty());
     }
+
+    @Test
+    void includeFromOtherMapperFile() {
+        MyBatisXmlExtractor ex = new MyBatisXmlExtractor();
+        String common = """
+                <mapper namespace="com.Common">
+                  <sql id="empCols">${alias}.EMP_NO, ${alias}.EMP_NM, <include refid="deptCol"/></sql>
+                  <sql id="deptCol">${alias}.DEPT_CD</sql>
+                  <sql id="paging">LIMIT #{size} OFFSET #{offset}</sql>
+                </mapper>""";
+        String emp = """
+                <mapper namespace="com.Emp">
+                  <select id="list">
+                    SELECT <include refid="com.Common.empCols"><property name="alias" value="e"/></include>
+                    FROM HR_EMP e <include refid="com.Common.paging"/>
+                  </select>
+                  <select id="byId">SELECT * FROM HR_EMP <include refid="paging"/></select>
+                  <select id="missing">SELECT * FROM HR_EMP <include refid="nope.Mapper.x"/></select>
+                </mapper>""";
+        ex.prepare("common.xml", common);
+        ex.prepare("emp.xml", emp);
+        Map<String, ExtractedSql> m = ex.extract("emp.xml", emp).stream()
+                .collect(Collectors.toMap(ExtractedSql::ownerId, Function.identity()));
+        assertEquals("SELECT e.EMP_NO, e.EMP_NM, e.DEPT_CD FROM HR_EMP e LIMIT #{size} OFFSET #{offset}",
+                m.get("com.Emp.list").sql());
+        assertFalse(m.get("com.Emp.list").dynamic());
+        // namespace 없이 id 만 적어도 프로젝트에 하나뿐이면 찾는다
+        assertEquals("SELECT * FROM HR_EMP LIMIT #{size} OFFSET #{offset}", m.get("com.Emp.byId").sql());
+        assertTrue(m.get("com.Emp.missing").dynamic());
+    }
+
+    @Test
+    void chooseBranchesBecomeVariants() {
+        Map<String, ExtractedSql> m = run("""
+                <mapper namespace="n">
+                  <select id="search">
+                    SELECT A FROM
+                    <choose>
+                      <when test="t == 'emp'">HR_EMP</when>
+                      <when test="t == 'dept'">HR_DEPT</when>
+                      <otherwise>HR_RETIRE</otherwise>
+                    </choose>
+                    WHERE 1=1
+                    <choose>
+                      <when test="x">AND B = 1</when>
+                      <otherwise>AND C = 2</otherwise>
+                    </choose>
+                  </select>
+                  <select id="plain">SELECT A FROM T</select>
+                </mapper>""");
+        ExtractedSql s = m.get("n.search");
+        assertEquals("SELECT A FROM HR_EMP WHERE 1=1 AND B = 1", s.sql());
+        assertEquals(List.of("SELECT A FROM HR_DEPT WHERE 1=1 AND C = 2",
+                "SELECT A FROM HR_RETIRE WHERE 1=1 AND C = 2"), s.variants());
+        assertTrue(m.get("n.plain").variants().isEmpty());
+    }
+
+    @Test
+    void nestedChooseInsideLaterBranch() {
+        Map<String, ExtractedSql> m = run("""
+                <mapper namespace="n">
+                  <select id="q">
+                    SELECT 1 FROM
+                    <choose>
+                      <when test="a">T1</when>
+                      <otherwise><choose><when test="b">T2</when><when test="c">T3</when><otherwise>T4</otherwise></choose></otherwise>
+                    </choose>
+                  </select>
+                </mapper>""");
+        ExtractedSql s = m.get("n.q");
+        assertEquals("SELECT 1 FROM T1", s.sql());
+        assertTrue(s.variants().contains("SELECT 1 FROM T3"), s.variants().toString());
+        assertTrue(s.variants().contains("SELECT 1 FROM T4"), s.variants().toString());
+    }
 }

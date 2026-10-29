@@ -78,55 +78,40 @@ public final class Indexer {
         Map<String, Set<String>> columnIndex = buildColumnIndex(snapshots);
         Map<String, Set<String>> pkIndex = buildPkIndex(snapshots);
 
-        // 2. 소스 스캔
+        // 2. 소스 스캔: 대상 파일 목록 → (필요하면) 파일 간 참조 수집 → 추출·분석
         List<IndexedStmt> stmts = new ArrayList<>();
         int[] files = {0, 0};
         if (opt.projectRoot() != null && Files.isDirectory(opt.projectRoot())) {
             Path root = opt.projectRoot().toAbsolutePath().normalize();
-            List<PathMatcher> inc = matchers(opt.include());
-            List<PathMatcher> exc = matchers(opt.exclude());
-            Files.walkFileTree(root, new SimpleFileVisitor<>() {
-                @Override
-                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                    if (!dir.equals(root)) {
-                        String name = dir.getFileName().toString();
-                        if (SKIP_DIRS.contains(name)) return FileVisitResult.SKIP_SUBTREE;
-                        if (matchesAny(exc, root.relativize(dir))) return FileVisitResult.SKIP_SUBTREE;
-                    }
-                    return FileVisitResult.CONTINUE;
-                }
+            List<SourceFile> targets = collect(root, extractors, opt);
+            files[0] = targets.size();
 
-                @Override
-                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                    Path rel = root.relativize(file);
-                    if (!inc.isEmpty() && !matchesAny(inc, rel)) return FileVisitResult.CONTINUE;
-                    if (matchesAny(exc, rel)) return FileVisitResult.CONTINUE;
-                    if (attrs.size() > opt.maxFileBytes()) return FileVisitResult.CONTINUE;
-                    String relStr = rel.toString().replace('\\', '/');
-                    List<SqlExtractor> applicable = extractors.stream().filter(x -> x.supports(relStr)).toList();
-                    if (applicable.isEmpty()) return FileVisitResult.CONTINUE;
-                    files[0]++;
-                    try {
-                        String content = TextFiles.read(file);
-                        boolean found = false;
-                        for (SqlExtractor x : applicable) {
-                            for (ExtractedSql es : x.extract(relStr, content)) {
-                                stmts.add(new IndexedStmt(es, resolve(analyzer.analyze(es.sql()), columnIndex, pkIndex)));
-                                found = true;
-                            }
+            for (SourceFile f : targets) {
+                List<SqlExtractor> pre = f.extractors().stream().filter(SqlExtractor::needsPrepare).toList();
+                if (pre.isEmpty()) continue;
+                try {
+                    String content = TextFiles.read(f.path());
+                    for (SqlExtractor x : pre) x.prepare(f.rel(), content);
+                } catch (Exception e) {
+                    warnings.add("[src] " + f.rel() + ": " + e.getMessage());
+                }
+            }
+
+            for (SourceFile f : targets) {
+                try {
+                    String content = TextFiles.read(f.path());
+                    boolean found = false;
+                    for (SqlExtractor x : f.extractors()) {
+                        for (ExtractedSql es : x.extract(f.rel(), content)) {
+                            stmts.add(new IndexedStmt(es, resolve(analyze(es), columnIndex, pkIndex)));
+                            found = true;
                         }
-                        if (found) files[1]++;
-                    } catch (Exception e) {
-                        warnings.add("[src] " + relStr + ": " + e.getMessage());
                     }
-                    return FileVisitResult.CONTINUE;
+                    if (found) files[1]++;
+                } catch (Exception e) {
+                    warnings.add("[src] " + f.rel() + ": " + e.getMessage());
                 }
-
-                @Override
-                public FileVisitResult visitFileFailed(Path file, IOException exc) {
-                    return FileVisitResult.CONTINUE;
-                }
-            });
+            }
         } else {
             warnings.add("project 경로가 없거나 폴더가 아닙니다: " + opt.projectRoot());
         }
@@ -148,6 +133,51 @@ public final class Indexer {
 
         return new Report(snapshots.size(), tables, columns, files[0], files[1], stmts.size(), parsed,
                 stmts.size() - parsed, dynamic, millis, warnings);
+    }
+
+    private record SourceFile(Path path, String rel, List<SqlExtractor> extractors) {}
+
+    /** 추출기가 처리할 수 있는 파일 목록 (건너뛸 폴더, include/exclude, 크기 제한 적용) */
+    private static List<SourceFile> collect(Path root, List<SqlExtractor> extractors, Options opt) throws IOException {
+        List<SourceFile> out = new ArrayList<>();
+        List<PathMatcher> inc = matchers(opt.include());
+        List<PathMatcher> exc = matchers(opt.exclude());
+        Files.walkFileTree(root, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                if (!dir.equals(root)) {
+                    String name = dir.getFileName().toString();
+                    if (SKIP_DIRS.contains(name)) return FileVisitResult.SKIP_SUBTREE;
+                    if (matchesAny(exc, root.relativize(dir))) return FileVisitResult.SKIP_SUBTREE;
+                }
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                Path rel = root.relativize(file);
+                if (!inc.isEmpty() && !matchesAny(inc, rel)) return FileVisitResult.CONTINUE;
+                if (matchesAny(exc, rel)) return FileVisitResult.CONTINUE;
+                if (attrs.size() > opt.maxFileBytes()) return FileVisitResult.CONTINUE;
+                String relStr = rel.toString().replace('\\', '/');
+                List<SqlExtractor> applicable = extractors.stream().filter(x -> x.supports(relStr)).toList();
+                if (!applicable.isEmpty()) out.add(new SourceFile(file, relStr, applicable));
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFileFailed(Path file, IOException e) {
+                return FileVisitResult.CONTINUE;
+            }
+        });
+        return out;
+    }
+
+    /** 본 SQL 과 다른 분기(variants)를 각각 분석해 합친다 */
+    private AnalyzedSql analyze(ExtractedSql es) {
+        AnalyzedSql a = analyzer.analyze(es.sql());
+        for (String v : es.variants()) a = a.merge(analyzer.analyze(v));
+        return a;
     }
 
     /** 테이블명(키) → 컬럼명(키) 집합. 여러 DB 에 같은 이름이 있으면 합친다. */
