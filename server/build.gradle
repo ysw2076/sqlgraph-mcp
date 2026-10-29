@@ -91,12 +91,16 @@ tasks.register('packageDist', Zip) {
     dependsOn 'fatJar', 'runtimeImage'
     archiveFileName = "sqlgraph-mcp-${distOs}-${distArch}.zip"
     destinationDirectory = layout.buildDirectory.dir('dist')
-    into('sqlgraph') {
-        from('src/launcher') {
-            include 'bin/**'
-            filePermissions { unix('rwxr-xr-x') }
+    // Gradle 9 는 archive 의 파일 권한을 기본 644 로 통일한다 → 실행 파일 권한을 명시
+    filePermissions { unix('rw-r--r--') }
+    dirPermissions { unix('rwxr-xr-x') }
+    eachFile { f ->
+        if (f.path ==~ /sqlgraph\/(bin\/sqlgraph|runtime\/bin\/[^\/]+|runtime\/lib\/jspawnhelper|runtime\/lib\/jexec)/) {
+            f.permissions { unix('rwxr-xr-x') }
         }
-        from('src/launcher') { exclude 'bin/**' }
+    }
+    into('sqlgraph') {
+        from('src/launcher')
         into('lib') {
             from(tasks.named('fatJar'))
             rename { 'sqlgraph-mcp.jar' }
