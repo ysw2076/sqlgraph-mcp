@@ -31,8 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/ysw2076/sqlgraph-mcp/main/install.s
 
 Claude Code 를 새로 열고 `/mcp` 에서 `sqlgraph` 가 connected 인지 확인하면 끝입니다.
 
-> 저장소가 비공개인 동안에는 한 줄 설치가 동작하지 않습니다 (비공개 저장소의 Release 파일은 로그인 없이 받을 수 없음).
-> Releases 페이지에서 OS 에 맞는 zip 을 직접 받은 뒤 `SQLGRAPH_ZIP` 으로 지정하세요.
+> 인터넷이 막힌 환경에서는 Releases 페이지에서 OS 에 맞는 zip 을 받아 `SQLGRAPH_ZIP` 으로 지정하세요.
 > ```powershell
 > $env:SQLGRAPH_ZIP = "$HOME\Downloads\sqlgraph-mcp-windows-x64.zip"; .\install.ps1
 > ```
@@ -195,3 +194,7 @@ extractor/  MyBatisXmlExtractor, SqlFileExtractor
 server/     MCP 서버, 도구, Workspace(여러 프로젝트), CLI, Installer, 실행 스크립트(src/launcher)
 samples/    hr-project (sqlgraph.yml + DDL), spring-hr (application.yml 자동 탐지)
 ```
+
+## 라이선스
+
+MIT — [LICENSE](LICENSE)
