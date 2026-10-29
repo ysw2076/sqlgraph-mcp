@@ -48,3 +48,61 @@ tasks.register('fatJar', Jar) {
 }
 
 tasks.named('build') { dependsOn 'fatJar' }
+
+// ---------------------------------------------------------------------------
+// Java 런타임 내장 배포: build/dist/sqlgraph-mcp-<os>-<arch>.zip
+//   sqlgraph/bin/sqlgraph(.cmd)   실행 스크립트
+//   sqlgraph/lib/sqlgraph-mcp.jar
+//   sqlgraph/runtime/             jlink 로 만든 경량 Java 런타임 (사용자 PC 에 Java 불필요)
+// 런타임은 빌드하는 OS 용으로만 만들어지므로 OS 별로 각각 빌드한다 (GitHub Actions release.yml)
+// ---------------------------------------------------------------------------
+def osName = System.getProperty('os.name').toLowerCase()
+def distOs = osName.contains('win') ? 'windows' : osName.contains('mac') ? 'macos' : 'linux'
+def archName = System.getProperty('os.arch').toLowerCase()
+def distArch = (archName in ['aarch64', 'arm64']) ? 'arm64' : 'x64'
+
+// jdeps 결과 + JDBC 드라이버(JNDI, XA, 로깅) + 한글 MS949 문자셋(jdk.charsets)
+def runtimeModules = [
+    'java.base', 'java.desktop', 'java.logging', 'java.management', 'java.naming', 'java.net.http',
+    'java.security.jgss', 'java.security.sasl', 'java.sql', 'java.sql.rowset', 'java.transaction.xa',
+    'java.xml', 'jdk.charsets', 'jdk.crypto.ec', 'jdk.unsupported',
+]
+
+def toolchainLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+
+tasks.register('runtimeImage', Exec) {
+    group = 'distribution'
+    description = 'jlink 로 경량 Java 런타임 생성'
+    def out = layout.buildDirectory.dir('runtime').get().asFile
+    outputs.dir(out)
+    doFirst {
+        out.deleteDir()   // jlink 는 출력 폴더가 있으면 실패한다
+        def jdk = toolchainLauncher.get().metadata.installationPath.asFile
+        executable = new File(jdk, 'bin/jlink' + (distOs == 'windows' ? '.exe' : '')).absolutePath
+    }
+    args '--add-modules', runtimeModules.join(','),
+         '--strip-debug', '--no-header-files', '--no-man-pages', '--compress=zip-6',
+         '--output', out.absolutePath
+}
+
+tasks.register('packageDist', Zip) {
+    group = 'distribution'
+    description = 'OS 별 배포 zip (Java 런타임 포함)'
+    dependsOn 'fatJar', 'runtimeImage'
+    archiveFileName = "sqlgraph-mcp-${distOs}-${distArch}.zip"
+    destinationDirectory = layout.buildDirectory.dir('dist')
+    into('sqlgraph') {
+        from('src/launcher') {
+            include 'bin/**'
+            filePermissions { unix('rwxr-xr-x') }
+        }
+        from('src/launcher') { exclude 'bin/**' }
+        into('lib') {
+            from(tasks.named('fatJar'))
+            rename { 'sqlgraph-mcp.jar' }
+        }
+        into('runtime') {
+            from(layout.buildDirectory.dir('runtime'))
+        }
+    }
+}

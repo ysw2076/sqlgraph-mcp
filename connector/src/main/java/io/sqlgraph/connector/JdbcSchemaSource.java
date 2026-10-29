@@ -35,6 +35,9 @@ public final class JdbcSchemaSource implements SchemaSource {
     public record Settings(String id, String url, String user, String password, Path driverJar,
                            String driverClass, String schema, Map<String, String> properties) {}
 
+    /** 접속 대기 시간 (초). 방화벽 등으로 응답이 없을 때 MCP 호출이 오래 멈추지 않도록 */
+    static final int CONNECT_TIMEOUT_SEC = 10;
+
     /** URL 접두어 → 드라이버 클래스 (fat jar 에서 ServiceLoader 등록이 빠져도 동작하도록 명시 로드) */
     private static final Map<String, List<String>> KNOWN_DRIVERS = new LinkedHashMap<>();
 
@@ -53,9 +56,16 @@ public final class JdbcSchemaSource implements SchemaSource {
     }
 
     private final Settings s;
+    private final DriverResolver resolver;
 
     public JdbcSchemaSource(Settings settings) {
+        this(settings, null);
+    }
+
+    /** @param resolver 내장 드라이버가 없을 때 Maven Central 에서 받아올 리졸버 (null 이면 받지 않음) */
+    public JdbcSchemaSource(Settings settings, DriverResolver resolver) {
         this.s = settings;
+        this.resolver = resolver;
     }
 
     @Override
@@ -75,6 +85,7 @@ public final class JdbcSchemaSource implements SchemaSource {
         if (lower.startsWith("jdbc:mysql:") || lower.startsWith("jdbc:mariadb:")) {
             props.putIfAbsent("useInformationSchema", "true");
         }
+        applyTimeouts(lower, props);
         if (s.properties() != null) props.putAll(s.properties());
 
         try (Connection conn = connect(url, props, warnings)) {
@@ -172,63 +183,98 @@ public final class JdbcSchemaSource implements SchemaSource {
     }
 
     private Connection connect(String url, Properties props, List<String> warnings) throws Exception {
+        DriverManager.setLoginTimeout(CONNECT_TIMEOUT_SEC);
         if (s.driverJar() != null) {
             if (!Files.isRegularFile(s.driverJar())) {
                 throw new IllegalArgumentException("driverJar 파일이 없습니다: " + s.driverJar());
             }
-            URLClassLoader loader = new URLClassLoader(new URL[]{s.driverJar().toUri().toURL()},
-                    JdbcSchemaSource.class.getClassLoader());
-            Driver driver = null;
-            if (s.driverClass() != null) {
-                driver = (Driver) Class.forName(s.driverClass(), true, loader).getDeclaredConstructor().newInstance();
-            } else {
-                for (Driver d : ServiceLoader.load(Driver.class, loader)) {
-                    if (d.getClass().getClassLoader() == loader && d.acceptsURL(url)) {
-                        driver = d;
-                        break;
-                    }
-                }
-                if (driver == null) {
-                    for (String cls : candidates(url)) {
-                        try {
-                            driver = (Driver) Class.forName(cls, true, loader).getDeclaredConstructor().newInstance();
-                            break;
-                        } catch (ClassNotFoundException ignore) {
-                            // 다음 후보
-                        }
-                    }
-                }
-            }
-            if (driver == null) {
-                throw new IllegalArgumentException("driverJar 에서 URL 을 처리할 드라이버를 찾지 못했습니다. driverClass 를 지정하세요");
-            }
-            Connection c = driver.connect(url, props);
-            if (c == null) throw new SQLException("드라이버가 URL 을 거부했습니다: " + url);
-            return c;
+            return connectWithJar(s.driverJar(), url, props);
         }
 
         boolean loaded = false;
         if (s.driverClass() != null) {
-            Class.forName(s.driverClass());
-            loaded = true;
+            try {
+                Class.forName(s.driverClass());
+                loaded = true;
+            } catch (ClassNotFoundException e) {
+                // 내장되지 않은 드라이버 → 아래에서 다운로드 시도
+            }
         } else {
             for (String cls : candidates(url)) {
-                try {
-                    Class.forName(cls);
+                if (isPresent(cls)) {
                     loaded = true;
                     break;
-                } catch (ClassNotFoundException ignore) {
-                    // 다음 후보
                 }
             }
         }
         String lower = url.toLowerCase(Locale.ROOT);
+        if (!loaded && resolver != null && DriverResolver.artifactFor(url).isPresent()) {
+            try {
+                var jar = resolver.resolve(url);
+                if (jar.isPresent()) return connectWithJar(jar.get(), url, props);
+            } catch (Exception e) {
+                warnings.add("드라이버 자동 다운로드 실패: " + e.getMessage());
+            }
+        }
         if (!loaded && lower.startsWith("jdbc:mysql:") && isPresent("org.mariadb.jdbc.Driver")) {
             // MySQL 드라이버가 없으면 내장 MariaDB 드라이버로 접속 (MySQL 호환)
             url = "jdbc:mariadb:" + url.substring("jdbc:mysql:".length());
             warnings.add("MySQL 드라이버가 없어 MariaDB 드라이버로 접속했습니다");
+        } else if (!loaded && !lower.startsWith("jdbc:mysql:")) {
+            String hint = DriverResolver.artifactFor(url).isPresent()
+                    ? "드라이버를 내려받지 못했습니다. 네트워크를 확인하거나 driverJar 를 지정하세요"
+                    : "내장되지 않은 DB 입니다. sqlgraph.yml 에 driverJar 로 드라이버 jar 를 지정하세요";
+            throw new SQLException("JDBC 드라이버 없음: " + hint);
         }
         return DriverManager.getConnection(url, props);
+    }
+
+    private Connection connectWithJar(Path jar, String url, Properties props) throws Exception {
+        URLClassLoader loader = new URLClassLoader(new URL[]{jar.toUri().toURL()},
+                JdbcSchemaSource.class.getClassLoader());
+        Driver driver = null;
+        if (s.driverClass() != null) {
+            driver = (Driver) Class.forName(s.driverClass(), true, loader).getDeclaredConstructor().newInstance();
+        } else {
+            for (Driver d : ServiceLoader.load(Driver.class, loader)) {
+                if (d.getClass().getClassLoader() == loader && d.acceptsURL(url)) {
+                    driver = d;
+                    break;
+                }
+            }
+            if (driver == null) {
+                for (String cls : candidates(url)) {
+                    try {
+                        driver = (Driver) Class.forName(cls, true, loader).getDeclaredConstructor().newInstance();
+                        break;
+                    } catch (ClassNotFoundException ignore) {
+                        // 다음 후보
+                    }
+                }
+            }
+        }
+        if (driver == null) {
+            throw new IllegalArgumentException("driverJar 에서 URL 을 처리할 드라이버를 찾지 못했습니다. driverClass 를 지정하세요");
+        }
+        Connection c = driver.connect(url, props);
+        if (c == null) throw new SQLException("드라이버가 URL 을 거부했습니다: " + url);
+        return c;
+    }
+
+    /** DB 별 접속 타임아웃 속성 (사용자가 properties 로 준 값이 우선) */
+    static void applyTimeouts(String lowerUrl, Properties p) {
+        String ms = String.valueOf(CONNECT_TIMEOUT_SEC * 1000);
+        String sec = String.valueOf(CONNECT_TIMEOUT_SEC);
+        if (lowerUrl.startsWith("jdbc:mariadb:") || lowerUrl.startsWith("jdbc:mysql:")) {
+            p.putIfAbsent("connectTimeout", ms);
+        } else if (lowerUrl.startsWith("jdbc:postgresql:")) {
+            p.putIfAbsent("connectTimeout", sec);
+            p.putIfAbsent("loginTimeout", sec);
+        } else if (lowerUrl.startsWith("jdbc:oracle:")) {
+            p.putIfAbsent("oracle.net.CONNECT_TIMEOUT", ms);
+        } else if (lowerUrl.startsWith("jdbc:sqlserver:")) {
+            p.putIfAbsent("loginTimeout", sec);
+        }
     }
 
     private static List<String> candidates(String url) {

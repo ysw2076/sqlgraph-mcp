@@ -1,0 +1,25 @@
+# 샘플: sqlgraph.yml 없이 이 설정만으로 DB 를 자동 탐지한다
+spring:
+  profiles:
+    active: local
+  datasource:
+    driver-class-name: org.mariadb.jdbc.Driver
+    username: reader
+mybatis:
+  mapper-locations: classpath:mapper/**/*.xml
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  datasource:
+    url: jdbc:mariadb://localhost:3306/hr
+    password: ${HR_DB_PW:readpw}
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+  datasource:
+    url: jdbc:mariadb://prod-db.example.com:3306/hr
+    password: ENC(dummyEncryptedValue)

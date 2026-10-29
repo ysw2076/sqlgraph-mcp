@@ -1,3 +1,4 @@
 dependencies {
     api project(':core')
+    implementation "org.yaml:snakeyaml:${v.snakeyaml}"   // Spring application.yml 파싱
 }

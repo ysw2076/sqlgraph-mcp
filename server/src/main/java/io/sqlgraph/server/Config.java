@@ -12,11 +12,16 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * sqlgraph.yml 설정. 상대 경로는 설정 파일이 있는 폴더 기준.
+ * 프로젝트 하나의 인덱싱 설정.
+ *
+ * <p>sqlgraph.yml 은 선택 사항이다. 없으면 프로젝트 설정 파일(application.yml, .env 등)에서
+ * DB 접속 정보를 자동으로 찾는다 (autoDetect). 상대 경로는 설정 파일이 있는 폴더 기준.
  *
  * <pre>
- * project: ../my-project
- * index: .sqlgraph/graph.db          # 생략 시 &lt;project&gt;/.sqlgraph/graph.db
+ * project: .
+ * index: .sqlgraph/graph.db          # 생략 시 ~/.sqlgraph/indexes/... (프로젝트 폴더 밖)
+ * autodetect: true                   # databases 가 없으면 기본 true
+ * profile: local                     # 자동 탐지 시 사용할 Spring 프로필
  * databases:
  *   - id: hr
  *     type: jdbc
@@ -33,16 +38,19 @@ import java.util.Map;
  * </pre>
  */
 public record Config(Path file, Path baseDir, Path project, Path index, List<Db> databases,
-                     List<String> include, List<String> exclude, long maxFileBytes) {
+                     List<String> include, List<String> exclude, long maxFileBytes,
+                     boolean autoDetect, String profile) {
 
     public record Db(String id, String type, String url, String user, String password, String passwordEnv,
                      String driverJar, String driverClass, String schema, List<String> files, String dialect,
                      Map<String, String> properties) {}
 
     public static final List<String> DEFAULT_INCLUDE = List.of("**/*.xml", "**/*.sql");
+    static final long DEFAULT_MAX_BYTES = 5L * 1024 * 1024;
 
+    /** @param defaultIndex index 를 지정하지 않았을 때 쓸 위치 */
     @SuppressWarnings("unchecked")
-    public static Config load(Path file) throws Exception {
+    public static Config load(Path file, Path defaultIndex) throws Exception {
         Path abs = file.toAbsolutePath().normalize();
         Map<String, Object> root;
         try (Reader r = Files.newBufferedReader(abs, StandardCharsets.UTF_8)) {
@@ -53,7 +61,7 @@ public record Config(Path file, Path baseDir, Path project, Path index, List<Db>
         Path project = base.resolve(str(root.get("project"), ".")).normalize();
         Path index = root.get("index") != null
                 ? base.resolve(str(root.get("index"), null)).normalize()
-                : project.resolve(".sqlgraph/graph.db");
+                : defaultIndex;
 
         List<Db> dbs = new ArrayList<>();
         Object dbList = root.get("databases");
@@ -74,24 +82,36 @@ public record Config(Path file, Path baseDir, Path project, Path index, List<Db>
                         str(d.get("dialect"), null), props));
             }
         }
+        boolean autoDetect = root.get("autodetect") instanceof Boolean b ? b : !root.containsKey("databases");
 
         List<String> include = DEFAULT_INCLUDE;
         List<String> exclude = List.of();
-        long maxBytes = 5L * 1024 * 1024;
+        long maxBytes = DEFAULT_MAX_BYTES;
         if (root.get("sources") instanceof Map<?, ?> sm) {
             Map<String, Object> s = (Map<String, Object>) sm;
             if (s.get("include") != null) include = strList(s.get("include"));
             if (s.get("exclude") != null) exclude = strList(s.get("exclude"));
             if (s.get("maxFileKb") instanceof Number num) maxBytes = num.longValue() * 1024;
         }
-        return new Config(abs, base, project, index, dbs, include, exclude, maxBytes);
+        return new Config(abs, base, project, index, dbs, include, exclude, maxBytes, autoDetect,
+                str(root.get("profile"), null));
     }
 
-    /** 설정 파일 없이 프로젝트 폴더만으로 실행할 때 (DB 없이 소스만 인덱싱) */
-    public static Config ofProject(Path project) {
+    /** 설정 파일 없이 프로젝트 폴더만으로 (DB 는 자동 탐지) */
+    public static Config ofProject(Path project, Path index, String profile) {
         Path p = project.toAbsolutePath().normalize();
-        return new Config(null, p, p, p.resolve(".sqlgraph/graph.db"), List.of(), DEFAULT_INCLUDE, List.of(),
-                5L * 1024 * 1024);
+        return new Config(null, p, p, index, List.of(), DEFAULT_INCLUDE, List.of(), DEFAULT_MAX_BYTES, true, profile);
+    }
+
+    /** 같은 설정에 프로필만 바꾼 것 */
+    public Config withProfile(String p) {
+        return new Config(file, baseDir, project, index, databases, include, exclude, maxFileBytes, autoDetect,
+                p == null ? profile : p);
+    }
+
+    /** DB 없이 소스만 인덱싱 */
+    public Config withoutDatabases() {
+        return new Config(file, baseDir, project, index, List.of(), include, exclude, maxFileBytes, false, profile);
     }
 
     private static String str(Object o, String def) {

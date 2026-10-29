@@ -1,0 +1,14 @@
+#!/bin/sh
+# sqlgraph 실행 스크립트 (Linux / macOS). 함께 들어 있는 Java 런타임으로 실행한다.
+SELF="$0"
+while [ -h "$SELF" ]; do
+  LINK=$(readlink "$SELF")
+  case "$LINK" in
+    /*) SELF="$LINK" ;;
+    *) SELF="$(dirname "$SELF")/$LINK" ;;
+  esac
+done
+APP_HOME=$(cd "$(dirname "$SELF")/.." && pwd -P)
+exec "$APP_HOME/runtime/bin/java" --enable-native-access=ALL-UNNAMED \
+  -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 \
+  -jar "$APP_HOME/lib/sqlgraph-mcp.jar" "$@"

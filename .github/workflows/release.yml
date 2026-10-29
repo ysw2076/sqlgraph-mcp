@@ -1,0 +1,73 @@
+# v* 태그를 푸시하면 OS 별 배포 zip(Java 런타임 포함)을 만들어 GitHub Release 에 올린다
+#   git tag v0.2.0 && git push origin v0.2.0
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '릴리스할 태그 (예: v0.2.0)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Create release (if missing)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "sqlgraph-mcp $TAG" --generate-notes
+
+  package:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest      # linux-x64
+          - os: windows-latest     # windows-x64
+          - os: macos-latest       # macos-arm64 (Apple Silicon)
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+      - name: Test and package
+        run: ./gradlew build :server:packageDist --no-daemon
+      - name: Smoke test (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          unzip -q -o server/build/dist/*.zip -d "$RUNNER_TEMP/smoke"
+          "$RUNNER_TEMP/smoke/sqlgraph/bin/sqlgraph" --version
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem server/build/dist/*.zip | Select-Object -First 1
+          Expand-Archive $zip.FullName -DestinationPath "$env:RUNNER_TEMP\smoke" -Force
+          & "$env:RUNNER_TEMP\smoke\sqlgraph\bin\sqlgraph.cmd" --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Upload to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" server/build/dist/*.zip --clobber
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            # Java 가 이미 있는 사용자용 단일 jar
+            gh release upload "$TAG" server/build/libs/sqlgraph-mcp-*-all.jar --clobber
+          fi
