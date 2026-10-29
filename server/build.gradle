@@ -1,0 +1,50 @@
+apply plugin: 'application'
+
+dependencies {
+    implementation project(':core')
+    implementation project(':connector')
+    implementation project(':extractor')
+
+    implementation "com.fasterxml.jackson.core:jackson-databind:${v.jackson}"
+    implementation "com.fasterxml.jackson.core:jackson-core:${v.jacksonCore ?: v.jackson}"
+    implementation "com.fasterxml.jackson.core:jackson-annotations:${v.jackson}"
+    implementation "org.yaml:snakeyaml:${v.snakeyaml}"
+    implementation "info.picocli:picocli:${v.picocli}"
+
+    // 기본 내장 JDBC 드라이버 (그 외 DB는 설정의 driverJar 로 지정)
+    runtimeOnly "org.mariadb.jdbc:mariadb-java-client:${v.mariadb}"
+    runtimeOnly "org.postgresql:postgresql:${v.postgresql}"
+    if (!isOffline) {
+        runtimeOnly "com.oracle.database.jdbc:ojdbc11:${v.ojdbc}"
+        runtimeOnly "com.microsoft.sqlserver:mssql-jdbc:${v.mssql}"
+    }
+
+    testRuntimeOnly "org.mariadb.jdbc:mariadb-java-client:${v.mariadb}"
+}
+
+application {
+    mainClass = 'io.sqlgraph.server.Main'
+    applicationName = 'sqlgraph'
+    applicationDefaultJvmArgs = ['--enable-native-access=ALL-UNNAMED']
+}
+
+// 실행 jar 하나로 묶기: build/libs/sqlgraph-mcp-<version>-all.jar
+tasks.register('fatJar', Jar) {
+    group = 'build'
+    archiveBaseName = 'sqlgraph-mcp'
+    archiveClassifier = 'all'
+    manifest {
+        attributes 'Main-Class': application.mainClass.get(),
+                   'Enable-Native-Access': 'ALL-UNNAMED'   // sqlite-jdbc 네이티브 라이브러리 경고 제거 (JDK 22+)
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from sourceSets.main.output
+    dependsOn configurations.runtimeClasspath
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/*.EC',
+            'META-INF/INDEX.LIST', 'module-info.class'
+}
+
+tasks.named('build') { dependsOn 'fatJar' }

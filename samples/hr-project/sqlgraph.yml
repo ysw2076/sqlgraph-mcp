@@ -1,0 +1,13 @@
+# 샘플 설정: DB 접속 없이 DDL 파일로 두 DB 를 흉내낸다
+project: .
+databases:
+  - id: hr
+    type: ddl
+    files: ["ddl/mariadb_hr.sql"]
+    dialect: mariadb
+  - id: pay
+    type: ddl
+    files: ["ddl/oracle_*.sql"]
+    dialect: oracle
+sources:
+  include: ["**/*.xml", "src/**/*.sql"]

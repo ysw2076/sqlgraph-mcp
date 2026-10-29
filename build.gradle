@@ -1,0 +1,85 @@
+// ---------------------------------------------------------------------------
+// sqlgraph-mcp
+//
+// 일반 빌드      : ./gradlew build              (Maven Central 사용)
+// 폐쇄망 빌드    : ./gradlew build -Poffline    (libs/ 폴더의 jar 사용, README 참고)
+//                 폴더를 바꾸려면 -PofflineLibs=/path/to/jars
+// ---------------------------------------------------------------------------
+
+def offline = providers.gradleProperty('offline').isPresent()
+def offlineLibs = rootProject.file(providers.gradleProperty('offlineLibs').getOrElse('libs'))
+
+ext {
+    isOffline = offline
+    // Maven Central 기준 버전
+    v = [
+        jsqlparser: '4.9',
+        sqlite    : '3.46.1.0',
+        jackson   : '2.17.2',
+        snakeyaml : '2.2',
+        picocli   : '4.7.6',
+        mariadb   : '3.4.1',
+        postgresql: '42.7.4',
+        ojdbc     : '23.5.0.24.07',
+        mssql     : '12.8.1.jre11',
+        slf4j     : '2.0.13',
+        junit     : '5.10.3',
+    ]
+    if (offline) {
+        // libs/ 폴더에 들어 있는 jar 버전 (파일명: artifactId-version.jar)
+        v = [
+            jsqlparser: '4.9',
+            sqlite    : '3.44.1.0',
+            jackson   : '2.14.0',
+            jacksonCore: '2.14.1',
+            snakeyaml : '1.33',
+            picocli   : '4.6.2',
+            mariadb   : '2.7.6',
+            postgresql: '42.7.2',
+            slf4j     : '1.7.32',
+        ]
+    }
+}
+
+subprojects {
+    apply plugin: 'java-library'
+
+    group = 'io.sqlgraph'
+    version = '0.1.0'
+
+    java {
+        toolchain { languageVersion = JavaLanguageVersion.of(25) }
+    }
+
+    repositories {
+        if (offline) {
+            flatDir { dirs offlineLibs }
+        } else {
+            mavenCentral()
+        }
+    }
+
+    dependencies {
+        if (offline) {
+            testImplementation files("${offlineLibs}/junit-platform-console-standalone.jar")
+        } else {
+            testImplementation platform("org.junit:junit-bom:${rootProject.v.junit}")
+            testImplementation 'org.junit.jupiter:junit-jupiter'
+            testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+        }
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.compilerArgs += ['-Xlint:unchecked']
+    }
+
+    tasks.named('test') {
+        useJUnitPlatform()
+        jvmArgs '--enable-native-access=ALL-UNNAMED'
+        testLogging {
+            events = ['failed']
+            exceptionFormat = 'full'
+        }
+    }
+}

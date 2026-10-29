@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="EUC-KR"?>
+<!DOCTYPE sqlMap PUBLIC "-//ibatis.apache.org//DTD SQL Map 2.0//EN" "http://ibatis.apache.org/dtd/sql-map-2.dtd">
+<sqlMap namespace="LegacyEmp">
+    <!-- 레거시 사원 조회 (EUC-KR 인코딩 파일) -->
+    <select id="getEmpList" parameterClass="map" resultClass="hashmap">
+        SELECT EMP_NO, EMP_NM, EMAIL
+          FROM HR_EMP
+        <dynamic prepend="WHERE">
+            <isNotEmpty prepend="AND" property="deptCd">
+                DEPT_CD = #deptCd#
+            </isNotEmpty>
+            <isNotEmpty prepend="AND" property="empNos">
+                EMP_NO IN
+                <iterate property="empNos" open="(" close=")" conjunction=",">#empNos[]#</iterate>
+            </isNotEmpty>
+        </dynamic>
+    </select>
+
+    <update id="updateEmail" parameterClass="map">
+        UPDATE HR_EMP SET EMAIL = #email# WHERE EMP_NO = #empNo#
+    </update>
+</sqlMap>

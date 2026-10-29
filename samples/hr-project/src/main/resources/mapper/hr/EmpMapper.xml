@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.hr.mapper.EmpMapper">
+
+    <sql id="empColumns">
+        e.EMP_NO, e.EMP_NM, e.DEPT_CD, e.POS_CD, e.HIRE_DT, e.EMAIL
+    </sql>
+
+    <sql id="searchCond">
+        <if test="deptCd != null and deptCd != ''">
+            AND e.DEPT_CD = #{deptCd}
+        </if>
+        <if test="empNm != null">
+            AND e.EMP_NM LIKE CONCAT('%', #{empNm}, '%')
+        </if>
+    </sql>
+
+    <!-- 사원 목록 -->
+    <select id="selectEmpList" parameterType="map" resultType="map">
+        SELECT <include refid="empColumns"/>,
+               d.DEPT_NM,
+               c.CD_NM AS POS_NM
+          FROM HR_EMP e
+          LEFT JOIN HR_DEPT d ON d.DEPT_CD = e.DEPT_CD
+          LEFT JOIN CM_CODE c ON c.GRP_CD = 'POS' AND c.CD = e.POS_CD
+        <where>
+            <include refid="searchCond"/>
+            AND e.RETIRE_YN = 'N'
+            <if test="empNos != null">
+                AND e.EMP_NO IN
+                <foreach collection="empNos" item="no" open="(" separator="," close=")">#{no}</foreach>
+            </if>
+        </where>
+        ORDER BY ${orderBy}
+        LIMIT #{offset}, #{limit}
+    </select>
+
+    <select id="selectEmp" resultType="map">
+        SELECT * FROM HR_EMP WHERE EMP_NO = #{empNo}
+    </select>
+
+    <select id="countByDept" resultType="int">
+        SELECT COUNT(*) FROM HR_EMP WHERE DEPT_CD = #{deptCd} AND RETIRE_YN = 'N'
+    </select>
+
+    <insert id="insertEmp">
+        INSERT INTO HR_EMP (EMP_NO, EMP_NM, DEPT_CD, POS_CD, HIRE_DT, EMAIL, REG_DT)
+        VALUES (#{empNo}, #{empNm}, #{deptCd}, #{posCd}, #{hireDt}, #{email}, NOW())
+    </insert>
+
+    <update id="updateEmp">
+        UPDATE HR_EMP
+        <set>
+            <if test="empNm != null">EMP_NM = #{empNm},</if>
+            <if test="email != null">EMAIL = #{email},</if>
+            <if test="deptCd != null">DEPT_CD = #{deptCd},</if>
+        </set>
+        WHERE EMP_NO = #{empNo}
+    </update>
+
+    <update id="retireEmp">
+        UPDATE HR_EMP e
+           SET e.RETIRE_YN = 'Y'
+         WHERE e.EMP_NO = #{empNo}
+           AND NOT EXISTS (SELECT 1 FROM HR_APPNT a WHERE a.EMP_NO = e.EMP_NO AND a.STATUS_CD = '10')
+    </update>
+
+    <select id="selectEmpByCond" resultType="map">
+        SELECT e.EMP_NO, e.EMP_NM
+          FROM HR_EMP e
+         WHERE 1 = 1
+        <choose>
+            <when test="type == 'dept'">AND e.DEPT_CD = #{keyword}</when>
+            <when test="type == 'pos'">AND e.POS_CD = #{keyword}</when>
+            <otherwise>AND e.EMP_NM = #{keyword}</otherwise>
+        </choose>
+    </select>
+
+    <delete id="deleteEmp">
+        DELETE FROM HR_EMP WHERE EMP_NO = #{empNo}
+    </delete>
+</mapper>

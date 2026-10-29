@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.pay.mapper.PayMapper">
+
+    <!-- Oracle ROWNUM 페이징 -->
+    <select id="selectPayList" resultType="map">
+        SELECT * FROM (
+            SELECT ROWNUM RN, T.* FROM (
+                SELECT M.PAY_YM, M.EMP_NO, M.TOT_PAY_AMT, M.NET_PAY_AMT
+                  FROM PAY_MONTH M
+                 WHERE M.PAY_YM = #{payYm}
+                 ORDER BY M.EMP_NO
+            ) T WHERE ROWNUM <![CDATA[<=]]> #{end}
+        ) WHERE RN <![CDATA[>]]> #{start}
+    </select>
+
+    <!-- Oracle (+) 외부조인 -->
+    <select id="selectPayItems" resultType="map">
+        SELECT M.PAY_YM, M.EMP_NO, I.ITEM_CD, NVL(I.ITEM_AMT, 0) AS ITEM_AMT
+          FROM PAY_MONTH M, PAY_ITEM I
+         WHERE M.PAY_YM = I.PAY_YM(+)
+           AND M.EMP_NO = I.EMP_NO(+)
+           AND M.PAY_YM = #{payYm}
+    </select>
+
+    <update id="mergePayMonth">
+        MERGE INTO PAY_MONTH T
+        USING (SELECT #{payYm} AS PAY_YM, #{empNo} AS EMP_NO, SUM(ITEM_AMT) AS AMT
+                 FROM PAY_ITEM WHERE PAY_YM = #{payYm} AND EMP_NO = #{empNo}) S
+           ON (T.PAY_YM = S.PAY_YM AND T.EMP_NO = S.EMP_NO)
+         WHEN MATCHED THEN
+              UPDATE SET T.TOT_PAY_AMT = S.AMT, T.NET_PAY_AMT = S.AMT - T.TOT_DED_AMT
+         WHEN NOT MATCHED THEN
+              INSERT (PAY_YM, EMP_NO, TOT_PAY_AMT, NET_PAY_AMT) VALUES (S.PAY_YM, S.EMP_NO, S.AMT, S.AMT)
+    </update>
+
+    <insert id="insertPayHist">
+        <selectKey keyProperty="histId" resultType="long" order="BEFORE">
+            SELECT SEQ_PAY_HIST.NEXTVAL FROM DUAL
+        </selectKey>
+        INSERT INTO PAY_HIST (HIST_ID, PAY_YM, EMP_NO, CHG_DESC, REG_DT)
+        VALUES (#{histId}, #{payYm}, #{empNo}, #{chgDesc}, SYSDATE)
+    </insert>
+
+    <update id="closePayMonth">
+        UPDATE PAY_MONTH SET CLOSE_YN = 'Y' WHERE PAY_YM = #{payYm}
+    </update>
+
+    <select id="callPayCalc" statementType="CALLABLE">
+        { call PKG_PAY.CALC_MONTH(#{payYm, mode=IN}, #{result, mode=OUT, jdbcType=VARCHAR}) }
+    </select>
+</mapper>

@@ -1,0 +1,1 @@
+<mapper namespace="skip"><select id="x">SELECT * FROM SHOULD_NOT_APPEAR</select></mapper>

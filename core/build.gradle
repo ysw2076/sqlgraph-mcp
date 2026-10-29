@@ -1,0 +1,6 @@
+dependencies {
+    api "com.github.jsqlparser:jsqlparser:${v.jsqlparser}"
+    implementation "org.xerial:sqlite-jdbc:${v.sqlite}"
+    implementation "org.slf4j:slf4j-api:${v.slf4j}"      // sqlite-jdbc 의존성 (폐쇄망 빌드용 명시)
+    runtimeOnly "org.slf4j:slf4j-nop:${v.slf4j}"         // 라이브러리 로그 출력 끄기
+}

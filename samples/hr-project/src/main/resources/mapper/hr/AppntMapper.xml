@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.hr.mapper.AppntMapper">
+
+    <select id="selectAppntList" resultType="map">
+        SELECT a.APPNT_ID, a.EMP_NO, e.EMP_NM, a.APPNT_DT,
+               t.CD_NM AS APPNT_TYPE_NM,
+               bd.DEPT_NM AS BEF_DEPT_NM, ad.DEPT_NM AS AFT_DEPT_NM
+          FROM HR_APPNT a
+          JOIN HR_EMP e ON e.EMP_NO = a.EMP_NO
+          LEFT JOIN CM_CODE t ON t.GRP_CD = 'APPNT' AND t.CD = a.APPNT_TYPE_CD
+          LEFT JOIN HR_DEPT bd ON bd.DEPT_CD = a.BEF_DEPT_CD
+          LEFT JOIN HR_DEPT ad ON ad.DEPT_CD = a.AFT_DEPT_CD
+         WHERE a.APPNT_DT <![CDATA[>=]]> #{fromDt}
+           AND a.APPNT_DT <![CDATA[<=]]> #{toDt}
+         ORDER BY a.APPNT_DT DESC
+    </select>
+
+    <insert id="insertAppnt" useGeneratedKeys="true" keyProperty="appntId">
+        INSERT INTO HR_APPNT (EMP_NO, APPNT_TYPE_CD, APPNT_DT, BEF_DEPT_CD, AFT_DEPT_CD, AFT_POS_CD)
+        SELECT EMP_NO, #{typeCd}, #{appntDt}, DEPT_CD, #{aftDeptCd}, #{aftPosCd}
+          FROM HR_EMP
+         WHERE EMP_NO = #{empNo}
+    </insert>
+
+    <!-- 발령 확정: 사원 부서/직급 반영 (MariaDB multi-table update) -->
+    <update id="applyAppnt">
+        UPDATE HR_EMP e
+          JOIN HR_APPNT a ON a.EMP_NO = e.EMP_NO
+           SET e.DEPT_CD = a.AFT_DEPT_CD,
+               e.POS_CD  = a.AFT_POS_CD,
+               a.STATUS_CD = '90'
+         WHERE a.APPNT_ID = #{appntId}
+    </update>
+
+    <select id="selectFromDynamicTable" resultType="map">
+        SELECT APPNT_ID, EMP_NO FROM ${tableName} WHERE APPNT_DT = #{dt}
+    </select>
+
+    <select id="selectWithExternalInclude" resultType="map">
+        SELECT a.APPNT_ID FROM HR_APPNT a
+        <include refid="com.example.common.CommonMapper.paging"/>
+    </select>
+</mapper>

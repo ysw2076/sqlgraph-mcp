@@ -1,0 +1,8 @@
+.gradle/
+/build/
+/*/build/
+.sqlgraph/
+/libs/*.jar
+.idea/
+*.iml
+.vscode/
