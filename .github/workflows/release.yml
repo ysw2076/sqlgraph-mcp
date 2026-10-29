@@ -26,8 +26,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --title "sqlgraph-mcp $TAG" --generate-notes
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # 수동 재실행인데 기존 태그가 다른 커밋이고 아직 올라간 파일이 없으면 → 지금 커밋으로 다시 만든다
+            TAG_SHA=$(gh api "repos/${{ github.repository }}/commits/$TAG" --jq .sha 2>/dev/null || echo "")
+            ASSETS=$(gh release view "$TAG" --json assets --jq '.assets | length')
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "$TAG_SHA" != "$GITHUB_SHA" ] && [ "$ASSETS" = "0" ]; then
+              echo "Recreating $TAG at $GITHUB_SHA (was $TAG_SHA)"
+              gh release delete "$TAG" --cleanup-tag -y
+              gh release create "$TAG" --target "$GITHUB_SHA" --title "sqlgraph-mcp $TAG" --generate-notes
+            fi
+          else
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "sqlgraph-mcp $TAG" --generate-notes
+          fi
 
   package:
     needs: create-release
@@ -47,7 +57,14 @@ jobs:
           java-version: '25'
           cache: gradle
       - name: Test and package
-        run: ./gradlew build :server:packageDist --no-daemon
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew build :server:packageDist --no-daemon --stacktrace 2>&1 | tee gradle.log
+      - name: Report failures
+        if: failure()
+        shell: bash
+        run: python3 .github/scripts/report_failures.py || python .github/scripts/report_failures.py
       - name: Smoke test (Linux / macOS)
         if: runner.os != 'Windows'
         run: |
