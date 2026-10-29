@@ -50,7 +50,7 @@ Claude Code 에는 `npx -y sqlgraph-mcp serve`(npx) 또는 전역 설치 경로�
 
 Java 가 이미 있다면 Releases 의 `sqlgraph-mcp-<버전>-all.jar` 하나로도 됩니다 (JDK 25 필요):
 ```bash
-java -jar sqlgraph-mcp-0.3.0-all.jar install
+java -jar sqlgraph-mcp-0.3.1-all.jar install
 ```
 
 ## 사용
