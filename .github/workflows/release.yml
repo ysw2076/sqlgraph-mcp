@@ -89,30 +89,42 @@ jobs:
             gh release upload "$TAG" server/build/libs/sqlgraph-mcp-*-all.jar --clobber
           fi
 
-  # NPM_TOKEN 시크릿이 있으면 npm 에 배포 (없으면 건너뜀)
-  #   저장소 Settings → Secrets and variables → Actions → New repository secret → NPM_TOKEN
+  # npm 배포
+  #  - 첫 배포: 저장소 시크릿 NPM_TOKEN (npm Granular token) 으로 올린다
+  #  - 이후: npm 패키지 설정에서 Trusted Publisher(GitHub Actions, 워크플로 release.yml)를 연결하고
+  #          NPM_TOKEN 시크릿을 지우면 토큰 없이 OIDC 로 배포된다
   npm-publish:
     needs: package
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # Trusted Publishing(OIDC)
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+      - name: Upgrade npm (Trusted Publishing 은 npm 11.5.1 이상 필요)
+        run: npm install -g npm@latest
       - name: Publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: npm
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "::notice::NPM_TOKEN 시크릿이 없어 npm 배포를 건너뜁니다"
-            exit 0
-          fi
           VERSION="${TAG#v}"
           npm version "$VERSION" --no-git-tag-version --allow-same-version
           if npm view "sqlgraph-mcp@$VERSION" version >/dev/null 2>&1; then
             echo "::notice::sqlgraph-mcp@$VERSION 은 이미 npm 에 있습니다"
-          else
+            exit 0
+          fi
+          if [ -n "$NPM_TOKEN" ]; then
+            echo "토큰으로 배포"
+            NODE_AUTH_TOKEN="$NPM_TOKEN" npm publish --access public
+          elif npm view sqlgraph-mcp name >/dev/null 2>&1; then
+            echo "Trusted Publishing(OIDC)으로 배포"
+            unset NODE_AUTH_TOKEN
             npm publish --access public
+          else
+            echo "::notice::첫 npm 배포에는 NPM_TOKEN 시크릿이 필요합니다. 배포를 건너뜁니다"
           fi
