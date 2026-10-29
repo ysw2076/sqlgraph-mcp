@@ -104,7 +104,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
       - name: Upgrade npm (Trusted Publishing 은 npm 11.5.1 이상 필요)
         run: npm install -g npm@latest
       - name: Publish
@@ -120,10 +119,11 @@ jobs:
           fi
           if [ -n "$NPM_TOKEN" ]; then
             echo "토큰으로 배포"
-            NODE_AUTH_TOKEN="$NPM_TOKEN" npm publish --access public
+            echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > "$HOME/.npmrc"
+            npm publish --access public
+            rm -f "$HOME/.npmrc"
           elif npm view sqlgraph-mcp name >/dev/null 2>&1; then
             echo "Trusted Publishing(OIDC)으로 배포"
-            unset NODE_AUTH_TOKEN
             npm publish --access public
           else
             echo "::notice::첫 npm 배포에는 NPM_TOKEN 시크릿이 필요합니다. 배포를 건너뜁니다"
