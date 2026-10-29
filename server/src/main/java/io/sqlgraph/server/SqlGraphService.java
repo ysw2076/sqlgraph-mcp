@@ -171,9 +171,10 @@ public final class SqlGraphService implements AutoCloseable {
                 continue;
             }
             String glob = p.replace('\\', '/');
-            boolean absolute = Path.of(glob.substring(0, Math.max(1, glob.indexOf('*')))).isAbsolute();
+            int fixed = firstWildcard(glob);   // 와일드카드 앞까지만 Path 로 다룬다 (Windows)
+            String head = glob.substring(0, Math.max(0, glob.lastIndexOf('/', fixed) + 1));
+            boolean absolute = !head.isEmpty() && Path.of(head).isAbsolute();
             PathMatcher m = FileSystems.getDefault().getPathMatcher("glob:" + glob);
-            int fixed = glob.indexOf('*');
             String prefix = glob.substring(0, Math.max(0, glob.lastIndexOf('/', fixed)));
             Path start = base.resolve(prefix.isEmpty() ? "." : prefix).normalize();
             if (!Files.isDirectory(start)) continue;
@@ -188,6 +189,15 @@ public final class SqlGraphService implements AutoCloseable {
             }
         }
         return out;
+    }
+
+    private static int firstWildcard(String glob) {
+        int i = -1;
+        for (char c : new char[]{'*', '?', '[', '{'}) {
+            int k = glob.indexOf(c);
+            if (k >= 0 && (i < 0 || k < i)) i = k;
+        }
+        return i < 0 ? glob.length() : i;
     }
 
     @Override
