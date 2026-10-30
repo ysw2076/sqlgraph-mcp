@@ -45,7 +45,7 @@ subprojects {
     apply plugin: 'java-library'
 
     group = 'io.sqlgraph'
-    version = '0.3.1'
+    version = '0.4.0'
 
     java {
         toolchain { languageVersion = JavaLanguageVersion.of(25) }
