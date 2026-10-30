@@ -53,7 +53,7 @@ Claude Code is registered with `npx -y sqlgraph-mcp serve` (npx) or the global i
 
 If you already have Java, the single `sqlgraph-mcp-<version>-all.jar` from Releases is enough (requires JDK 25):
 ```bash
-java -jar sqlgraph-mcp-0.3.1-all.jar install
+java -jar sqlgraph-mcp-0.4.0-all.jar install
 ```
 
 ## Usage

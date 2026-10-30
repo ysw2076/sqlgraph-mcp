@@ -1,6 +1,6 @@
 {
   "name": "sqlgraph-mcp",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Local MCP server that indexes your DB schema and the SQL in your source (MyBatis, .sql) so AI coding tools like Claude Code can look them up directly",
   "keywords": ["mcp", "model-context-protocol", "claude", "claude-code", "sql", "mybatis", "database", "schema", "impact-analysis"],
   "homepage": "https://github.com/ysw2076/sqlgraph-mcp#readme",
