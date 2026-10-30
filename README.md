@@ -1,18 +1,21 @@
 # sqlgraph-mcp
 
-DB 스키마(테이블·컬럼·코멘트·PK·FK)와 소스 속 SQL(MyBatis/iBatis Mapper XML, `.sql`)을 인덱싱해 두고,
-Claude Code 같은 AI 코딩 도구가 **grep 없이 한 번에** 조회하게 해 주는 로컬 MCP 서버입니다.
+**English** | [한국어](README.ko.md)
+
+A local MCP server that indexes your DB schema (tables, columns, comments, PKs, FKs)
+and the SQL in your source code (MyBatis/iBatis mapper XML, `.sql` files),
+so AI coding tools like Claude Code can look them up **in one call — no grep needed**.
 
 ```
-나:     C:\work\hr-system DB 인덱싱해줘
-Claude: (index_project) application.yml 에서 MariaDB 를 찾아 테이블 214개, 쿼리 1,840건 인덱싱했습니다.
-나:     HR_EMP.DEPT_CD 바꾸면 영향받는 곳은?
-Claude: (impact_analysis) 쓰기 3건, 읽기 12건 + SELECT * 등 가능성 4건 … (Mapper id · 파일:줄)
+You:    Index the DB for C:\work\hr-system
+Claude: (index_project) Found MariaDB in application.yml — indexed 214 tables and 1,840 queries.
+You:    What's affected if I change HR_EMP.DEPT_CD?
+Claude: (impact_analysis) 3 writes, 12 reads, plus 4 possible usages (SELECT * etc.) … (mapper id · file:line)
 ```
 
-## 설치
+## Install
 
-Java 를 따로 설치할 필요가 없습니다. 배포 파일에 경량 Java 런타임이 들어 있습니다.
+No separate Java install required — each release bundles a lightweight Java runtime.
 
 **Windows (PowerShell)**
 ```powershell
@@ -24,14 +27,14 @@ irm https://raw.githubusercontent.com/ysw2076/sqlgraph-mcp/main/install.ps1 | ie
 curl -fsSL https://raw.githubusercontent.com/ysw2076/sqlgraph-mcp/main/install.sh | sh
 ```
 
-설치 스크립트가 하는 일:
-1. OS 에 맞는 배포 파일을 GitHub Releases 에서 받아 `~/.sqlgraph/app` 에 설치
-2. `sqlgraph` 명령을 PATH 에 추가
-3. `sqlgraph install` 로 **Claude Code 에 MCP 서버 자동 등록** (모든 프로젝트에서 사용, `--scope user`)
+What the install script does:
+1. Downloads the release for your OS from GitHub Releases into `~/.sqlgraph/app`
+2. Adds the `sqlgraph` command to your PATH
+3. Runs `sqlgraph install` to **register the MCP server with Claude Code** (available in every project, `--scope user`)
 
-Claude Code 를 새로 열고 `/mcp` 에서 `sqlgraph` 가 connected 인지 확인하면 끝입니다.
+Restart Claude Code and check that `sqlgraph` shows as connected under `/mcp`. That's it.
 
-> 인터넷이 막힌 환경에서는 Releases 페이지에서 OS 에 맞는 zip 을 받아 `SQLGRAPH_ZIP` 으로 지정하세요.
+> On a network without internet access, download the zip for your OS from the Releases page and point `SQLGRAPH_ZIP` at it.
 > ```powershell
 > $env:SQLGRAPH_ZIP = "$HOME\Downloads\sqlgraph-mcp-windows-x64.zip"; .\install.ps1
 > ```
@@ -41,70 +44,71 @@ Claude Code 를 새로 열고 `/mcp` 에서 `sqlgraph` 가 connected 인지 확�
 
 **npm (Node.js 18+)**
 ```bash
-npx -y sqlgraph-mcp install          # 설치 없이 바로 Claude Code 에 등록
-# 또는
+npx -y sqlgraph-mcp install          # register with Claude Code without installing anything globally
+# or
 npm install -g sqlgraph-mcp && sqlgraph-mcp install
 ```
-처음 실행할 때 OS 에 맞는 배포 파일(Java 런타임 포함)을 `~/.sqlgraph/versions/<버전>` 에 한 번 내려받습니다.
-Claude Code 에는 `npx -y sqlgraph-mcp serve`(npx) 또는 전역 설치 경로로 등록됩니다.
+On first run it downloads the release for your OS (Java runtime included) once into `~/.sqlgraph/versions/<version>`.
+Claude Code is registered with `npx -y sqlgraph-mcp serve` (npx) or the global install path.
 
-Java 가 이미 있다면 Releases 의 `sqlgraph-mcp-<버전>-all.jar` 하나로도 됩니다 (JDK 25 필요):
+If you already have Java, the single `sqlgraph-mcp-<version>-all.jar` from Releases is enough (requires JDK 25):
 ```bash
 java -jar sqlgraph-mcp-0.3.1-all.jar install
 ```
 
-## 사용
+## Usage
 
-Claude Code 에서 말로 하면 됩니다.
+Just ask Claude Code in plain language.
 
-| 이렇게 말하면 | 호출되는 도구 |
+| Say this | Tool called |
 |---|---|
-| "C:\work\hr-system DB 인덱싱해줘" | `index_project` |
-| "발령 관련 테이블 뭐 있어?" | `search_table` |
-| "HR_EMP 구조랑 쓰는 곳 보여줘" | `describe_table` |
-| "EMAIL 컬럼 길이 바꾸면 영향 범위?" | `impact_analysis` |
-| "EmpMapper.selectEmpList 쿼리 보여줘" | `find_query` |
-| "HR_APPNT 에서 CM_CODE 까지 어떻게 조인해?" | `find_join_path` |
-| "인덱싱한 프로젝트 목록" | `list_projects` |
-| "인덱스 상태 확인해줘" | `index_status` |
+| "Index the DB for C:\work\hr-system" | `index_project` |
+| "What tables are there for personnel transfers?" | `search_table` |
+| "Show me HR_EMP's structure and where it's used" | `describe_table` |
+| "What's affected if I change the length of the EMAIL column?" | `impact_analysis` |
+| "Show me the EmpMapper.selectEmpList query" | `find_query` |
+| "How do I join HR_APPNT to CM_CODE?" | `find_join_path` |
+| "List the indexed projects" | `list_projects` |
+| "Check the index status" | `index_status` |
 
-- 여러 프로젝트를 인덱싱해 두고 이름으로 오갈 수 있습니다 ("pay-system 에서 PAY_MONTH 보여줘").
-- Mapper 나 스키마가 바뀌면 "다시 인덱싱해줘" 라고 하면 됩니다 (자동 감지는 아직 없음).
-- **FK 없는 관계**: 소스 쿼리의 조인 조건(`ON a.X = b.Y`, Oracle `(+)`, 상관 서브쿼리, 셀프 조인)에서 테이블 관계를 찾습니다.
-  공통코드처럼 PK 일부를 상수로 고정하는 조인(`c.GRP_CD = 'POS' AND c.CD = e.POS_CD`)은 조건까지 함께 기록합니다.
-  `describe_table` 에 FK·쿼리 근거 수와 참조 방향이 나오고, `find_join_path` 가 조인 SQL 을 만들어 줍니다.
-- `impact_analysis` 의 "사용 가능성 있음"은 `SELECT *`, 테이블을 특정할 수 없는 동명 컬럼, `${}` 동적 SQL, 파싱 실패 쿼리입니다.
+- You can index several projects and switch between them by name ("show me PAY_MONTH in pay-system").
+- When mappers or the schema change, just say "re-index" (no automatic change detection yet).
+- **Relationships without FKs**: table relationships are discovered from join conditions in your source queries
+  (`ON a.X = b.Y`, Oracle `(+)`, correlated subqueries, self joins).
+  Joins that pin part of a PK to a constant, as with common-code tables (`c.GRP_CD = 'POS' AND c.CD = e.POS_CD`), are recorded together with that condition.
+  `describe_table` shows the number of FK / query evidences and the reference direction, and `find_join_path` builds the join SQL for you.
+- "Possible usages" in `impact_analysis` are `SELECT *`, same-named columns whose table can't be determined, `${}` dynamic SQL, and queries that failed to parse.
 
-## DB 접속 정보는 어떻게 찾나
+## How DB connection settings are found
 
-`index_project` 를 부르면 서버가 프로젝트 안의 설정 파일을 **직접** 읽습니다.
-비밀번호가 Claude 대화를 거치지 않고, 도구 응답·로그에도 나오지 않습니다.
+When `index_project` is called, the server reads the configuration files in the project **itself**.
+Passwords never pass through the Claude conversation and never appear in tool responses or logs.
 
-| 대상 | 읽는 것 |
+| Source | What is read |
 |---|---|
-| Spring Boot | `application*.yml` / `application*.properties` 의 `spring.datasource.*`, `*.jdbc-url` (다중 datasource), `${ENV:기본값}` |
-| `.env` | `DATABASE_URL` (`postgres://`, `mysql://` …), Laravel 식 `DB_CONNECTION` / `DB_HOST` / `DB_DATABASE` / `DB_USERNAME` / `DB_PASSWORD` |
+| Spring Boot | `spring.datasource.*` and `*.jdbc-url` (multiple datasources) in `application*.yml` / `application*.properties`, `${ENV:default}` |
+| `.env` | `DATABASE_URL` (`postgres://`, `mysql://` …), Laravel-style `DB_CONNECTION` / `DB_HOST` / `DB_DATABASE` / `DB_USERNAME` / `DB_PASSWORD` |
 
-- **프로필 선택**: 같은 DB 설정이 여러 프로필에 있으면 `local` → `dev` → 기본 설정 순으로 고릅니다.
-  **`prod` 등 다른 프로필만 있으면 운영 DB 보호를 위해 접속하지 않습니다.** 필요하면 "prod 프로필로 인덱싱해줘".
-- `src/test` 아래 설정과 H2 등 메모리 DB 는 무시합니다. `log4jdbc`, `p6spy` 래퍼 URL 은 원래 URL 로 바꿔 접속합니다.
-- 비밀번호가 암호화(jasypt `ENC(...)`)돼 있거나 `${...}` 를 풀 수 없으면 환경변수로 지정합니다:
-  `SQLGRAPH_DB_PW` (모든 DB) 또는 `SQLGRAPH_DB_PW_<DB이름>` (예: `SQLGRAPH_DB_PW_HR`).
-- 접속 정보를 못 찾으면 **소스의 쿼리만** 인덱싱합니다. DB 접속 없이 하려면 "DB 접속 없이 인덱싱해줘" (`skip_db`).
-- DB 메타데이터(테이블·컬럼·코멘트·PK·FK)만 읽고 **데이터는 읽지 않습니다**. 읽기 전용 계정을 권장합니다.
-- 접속 대기 시간은 10초입니다 (방화벽 등으로 응답이 없을 때 오래 멈추지 않도록).
+- **Profile selection**: if the same DB is configured in several profiles, it picks `local` → `dev` → default, in that order.
+  **If only `prod` or other profiles exist, it will not connect, to protect production databases.** If you need it, say "index with the prod profile".
+- Configs under `src/test` and in-memory DBs such as H2 are ignored. `log4jdbc` and `p6spy` wrapper URLs are converted back to the original URL.
+- If a password is encrypted (jasypt `ENC(...)`) or a `${...}` can't be resolved, set it via an environment variable:
+  `SQLGRAPH_DB_PW` (all DBs) or `SQLGRAPH_DB_PW_<DB name>` (e.g. `SQLGRAPH_DB_PW_HR`).
+- If no connection settings are found, **only the queries in the source** are indexed. To index without connecting to a DB, say "index without DB access" (`skip_db`).
+- Only DB metadata (tables, columns, comments, PKs, FKs) is read — **never the data itself**. A read-only account is recommended.
+- The connection timeout is 10 seconds (so it doesn't hang when a firewall swallows the connection).
 
-### JDBC 드라이버
+### JDBC drivers
 
-- 내장: MariaDB (MySQL 겸용), PostgreSQL, Oracle (ojdbc11), SQL Server
-- 내장되지 않은 드라이버(MySQL Connector/J, H2, DB2 …)는 **처음 접속할 때 Maven Central 에서 자동으로 받아**
-  `~/.sqlgraph/drivers` 에 둡니다 (SHA-1 검증).
-- Maven Central 에 없는 드라이버(Tibero, Altibase 등)나 폐쇄망은 `sqlgraph.yml` 의 `driverJar` 로 지정합니다.
-  DBeaver 가 받아 둔 jar 를 지정해도 됩니다.
+- Bundled: MariaDB (also works for MySQL), PostgreSQL, Oracle (ojdbc11), SQL Server
+- Other drivers (MySQL Connector/J, H2, DB2 …) are **downloaded automatically from Maven Central on first connection**
+  into `~/.sqlgraph/drivers` (SHA-1 verified).
+- For drivers not on Maven Central (Tibero, Altibase, etc.) or air-gapped networks, set `driverJar` in `sqlgraph.yml`.
+  A jar already downloaded by DBeaver works too.
 
-### sqlgraph.yml (선택)
+### sqlgraph.yml (optional)
 
-자동 탐지가 안 되는 경우에만 프로젝트 루트에 둡니다 (`sqlgraph init` 으로 예시 생성).
+Only needed at the project root when auto-detection doesn't work (`sqlgraph init` generates an example).
 
 ```yaml
 project: .
@@ -113,104 +117,106 @@ databases:
     type: jdbc
     url: jdbc:tibero:thin:@dbhost:8629:tibero
     user: reader
-    passwordEnv: HR_DB_PW            # 비밀번호는 환경변수로 (password: 직접 지정도 가능)
+    passwordEnv: HR_DB_PW            # password via environment variable (password: also works)
     driverJar: ./drivers/tibero7-jdbc.jar
-  - id: pay                          # Oracle — 스키마(소유자) 지정
+  - id: pay                          # Oracle — specify the schema (owner)
     type: jdbc
     url: jdbc:oracle:thin:@//dbhost:1521/ORCL
     user: reader
     passwordEnv: PAY_DB_PW
     schema: PAY
-  - id: ext                          # DB 접속이 안 되는 환경: DDL 파일로 (mysqldump, Oracle export)
+  - id: ext                          # no DB access: use DDL files (mysqldump, Oracle export)
     type: ddl
     files: ["ddl/*.sql"]
     dialect: oracle
-# autodetect: true                   # databases 가 있으면 기본 false. 자동 탐지도 같이 하려면 true
-# profile: local                     # 자동 탐지 프로필
-# index: .sqlgraph/graph.db          # 인덱스를 프로젝트 안에 두고 싶을 때 (.gitignore 필수)
+# autodetect: true                   # defaults to false when databases is set; true to also auto-detect
+# profile: local                     # profile used for auto-detection
+# index: .sqlgraph/graph.db          # keep the index inside the project (add it to .gitignore!)
 sources:
   include: ["**/*.xml", "**/*.sql"]
   exclude: ["**/test/**"]
 ```
 
-## 데이터 위치
+## Where data is stored
 
 ```
-~/.sqlgraph/                       (환경변수 SQLGRAPH_HOME 으로 변경)
-  app/                             설치된 프로그램 (설치 스크립트 사용 시)
-  projects.json                    인덱싱한 프로젝트 목록
-  indexes/<프로젝트>-<해시>/graph.db  프로젝트별 인덱스 (SQLite)
-  drivers/                         자동으로 받은 JDBC 드라이버
+~/.sqlgraph/                       (override with the SQLGRAPH_HOME environment variable)
+  app/                             installed program (when using the install script)
+  projects.json                    list of indexed projects
+  indexes/<project>-<hash>/graph.db  per-project index (SQLite)
+  drivers/                         automatically downloaded JDBC drivers
 ```
 
-인덱스를 프로젝트 폴더 밖에 두기 때문에 회사 저장소에 DB 구조가 커밋될 걱정이 없습니다.
+Because the index lives outside your project folder, there's no risk of committing your DB structure to the company repository.
 
 ## CLI
 
 ```bash
-sqlgraph index C:\work\hr-system              # 인덱싱 (--profile dev, --skip-db)
+sqlgraph index C:\work\hr-system              # index (--profile dev, --skip-db)
 sqlgraph call describe_table '{"table":"HR_EMP"}'
 sqlgraph call impact_analysis '{"table":"HR_EMP","column":"DEPT_CD","project":"hr-system"}'
-sqlgraph install                               # Claude Code 등록 (--dry-run 으로 명령만 확인)
-sqlgraph uninstall                             # 등록 해제
-sqlgraph serve                                 # MCP 서버 (Claude Code 가 실행)
-sqlgraph init                                  # sqlgraph.yml 예시 생성
+sqlgraph install                               # register with Claude Code (--dry-run to just print the command)
+sqlgraph uninstall                             # unregister
+sqlgraph serve                                 # MCP server (launched by Claude Code)
+sqlgraph init                                  # generate an example sqlgraph.yml
 ```
 
-`claude` CLI 가 없으면 `sqlgraph install` 이 수동 등록 명령과 Claude Desktop 설정 예시를 출력합니다.
+If the `claude` CLI isn't available, `sqlgraph install` prints the manual registration command and an example Claude Desktop config.
 
-## 동작 방식
+> CLI and tool output messages are currently in Korean. Claude reads them fine and will answer in your language.
+
+## How it works
 
 ```
-[DB 커넥터]                    [SQL 추출기]                    [그래프 (SQLite)]
-설정 자동 탐지 → JDBC 메타데이터  MyBatis 3 Mapper XML            테이블 · 컬럼 · 코멘트 · FK
-DDL 파일 (접속 불가 환경)         iBatis 2 SqlMap XML             쿼리 ─ 사용 테이블 (읽기/쓰기)
-                               .sql 파일                       쿼리 ─ 사용 컬럼 (읽기/쓰기)
-                                                              쿼리 ─ Mapper id · 파일:줄
+[DB connector]                       [SQL extractor]               [Graph (SQLite)]
+config auto-detect → JDBC metadata   MyBatis 3 mapper XML          tables · columns · comments · FKs
+DDL files (no DB access)             iBatis 2 SqlMap XML           query ─ tables used (read/write)
+                                     .sql files                    query ─ columns used (read/write)
+                                                                   query ─ mapper id · file:line
 ```
 
-1. **DB 메타데이터 수집**: JDBC `DatabaseMetaData` 로 테이블·컬럼·코멘트·PK·FK 만 읽습니다.
-2. **SQL 추출**: Mapper XML 의 동적 태그(`if`, `where`, `set`, `foreach`, `include` …)를 평탄화해 분석 가능한 SQL 로 만듭니다.
-3. **SQL 분석**: JSqlParser 로 파싱해 테이블·컬럼과 읽기/쓰기 여부, 별칭을 해석합니다.
-   `WHERE EMP_NO = ?` 처럼 테이블이 지정되지 않은 컬럼은 DB 메타데이터로 어느 테이블 컬럼인지 확정합니다.
-   파싱에 실패한 쿼리도 정규식으로 테이블은 뽑아 둡니다.
-4. **저장**: SQLite 에 저장. 도구는 이 파일만 조회하므로 보통 수십 ms 안에 응답합니다.
+1. **Collect DB metadata**: reads only tables, columns, comments, PKs and FKs via JDBC `DatabaseMetaData`.
+2. **Extract SQL**: flattens dynamic tags in mapper XML (`if`, `where`, `set`, `foreach`, `include` …) into analyzable SQL.
+3. **Analyze SQL**: parses with JSqlParser to resolve tables, columns, read/write access and aliases.
+   Columns without a table qualifier (e.g. `WHERE EMP_NO = ?`) are resolved to their table using the DB metadata.
+   Even for queries that fail to parse, tables are still extracted with regular expressions.
+4. **Store**: saved to SQLite. The tools only query this file, so responses usually take tens of milliseconds.
 
-## 분석 규칙과 한계
+## Analysis rules and limitations
 
-- **동적 SQL**: 모든 `<if>` 가 참이라고 보고 펼칩니다. `<choose>` 는 **모든 `<when>`/`<otherwise>` 분기**를 각각 펼쳐 분석하고 결과(테이블·컬럼·조인)를 합칩니다. 화면에 보이는 SQL 은 첫 번째 분기 기준입니다.
-- **`<include>`**: 다른 Mapper 파일의 `<sql>` 조각도 찾아 펼치고, `<property>` 값으로 조각 안의 `${이름}` 을 바꿉니다. 끝내 못 찾은 조각만 "동적"으로 표시됩니다.
-- **`${...}`**: 런타임 값이라 분석에서 제외하고 "동적"으로 표시합니다.
-- **프로시저 호출**(`{call ...}`)은 쿼리로 등록하지만 프로시저 내부 테이블은 분석하지 않습니다.
-- **관계 추론**: 조인 조건이 있는 쿼리가 소스에 있어야 찾습니다. 같은 대상 컬럼으로 가는 여러 관계(발령 전/후 부서 등)는
-  하나로 묶지 않고 별개 관계로 표시합니다. 프로시저 본문 안의 조인은 아직 분석하지 않습니다.
-- **지원 소스**: MyBatis/iBatis XML, `.sql`. JPA `@Query`, 코드 속 SQL 문자열, ORM 모델은 다음 단계.
-- **테이블 매칭**은 이름 기준(대소문자 무시)입니다.
+- **Dynamic SQL**: every `<if>` is treated as true and expanded. For `<choose>`, **every `<when>`/`<otherwise>` branch** is expanded and analyzed separately, and the results (tables, columns, joins) are merged. The SQL shown is based on the first branch.
+- **`<include>`**: `<sql>` fragments in other mapper files are found and expanded too, and `${name}` inside a fragment is replaced with its `<property>` value. Only fragments that can't be found at all are marked as "dynamic".
+- **`${...}`**: runtime values, so they're excluded from analysis and marked as "dynamic".
+- **Procedure calls** (`{call ...}`) are registered as queries, but tables inside the procedure aren't analyzed.
+- **Relationship inference**: requires a query with the join condition to exist in the source. Multiple relationships to the same target column
+  (e.g. department before/after a transfer) are shown as separate relationships rather than merged. Joins inside procedure bodies aren't analyzed yet.
+- **Supported sources**: MyBatis/iBatis XML, `.sql`. JPA `@Query`, SQL strings in code and ORM models are planned.
+- **Table matching** is by name (case-insensitive).
 
-## 개발
+## Development
 
 ```bash
-./gradlew build                    # 빌드 + 테스트 → server/build/libs/sqlgraph-mcp-<버전>-all.jar
-./gradlew :server:packageDist      # 지금 OS 용 배포 zip (Java 런타임 포함) → server/build/dist/
+./gradlew build                    # build + test → server/build/libs/sqlgraph-mcp-<version>-all.jar
+./gradlew :server:packageDist      # distribution zip for the current OS (Java runtime included) → server/build/dist/
 ```
 
-- JDK 25, Gradle Wrapper 9.1. 폐쇄망은 `libs/` 에 jar 를 넣고 `-Poffline` (`libs/README.md`).
-- **릴리스**: `v*` 태그 푸시 또는 Actions → Release → Run workflow(태그 입력) → GitHub Actions(`release.yml`)가
-  Windows x64 / macOS arm64 / Linux x64 배포 zip 과 단일 jar 를 만들어 Release 에 올립니다.
-  저장소 시크릿 `NPM_TOKEN` 이 있으면 `npm/` 패키지도 같은 버전으로 npm 에 배포합니다.
-- 확장 포인트: `io.sqlgraph.core.spi.SchemaSource` (DB 입력 형식), `io.sqlgraph.core.spi.SqlExtractor` (언어·프레임워크).
-- MCP 프로토콜은 공식 SDK 없이 직접 구현했습니다 (stdio, JSON-RPC 2.0).
-- JSqlParser 4.9 를 사용합니다. 5.x 는 Visitor 시그니처가 바뀌어 `SqlAnalyzer.Collector` 를 함께 고쳐야 합니다.
+- JDK 25, Gradle Wrapper 9.1. For air-gapped networks, put the jars in `libs/` and use `-Poffline` (`libs/README.md`).
+- **Release**: push a `v*` tag or run Actions → Release → Run workflow (enter the tag). GitHub Actions (`release.yml`) builds
+  the Windows x64 / macOS arm64 / Linux x64 distribution zips and the single jar and uploads them to the Release.
+  The `npm/` package is published to npm with the same version (Trusted Publishing via GitHub Actions OIDC — no token needed).
+- Extension points: `io.sqlgraph.core.spi.SchemaSource` (DB input formats), `io.sqlgraph.core.spi.SqlExtractor` (languages/frameworks).
+- The MCP protocol is implemented directly, without the official SDK (stdio, JSON-RPC 2.0).
+- Uses JSqlParser 4.9. Version 5.x changed the visitor signatures, so `SqlAnalyzer.Collector` would need to be updated as well.
 
 ```
-core/       모델, SPI, SqlAnalyzer(JSqlParser), GraphStore(SQLite), Indexer
-connector/  JdbcSchemaSource, DdlSchemaSource, DriverResolver, detect/(설정 자동 탐지)
+core/       model, SPI, SqlAnalyzer (JSqlParser), GraphStore (SQLite), Indexer
+connector/  JdbcSchemaSource, DdlSchemaSource, DriverResolver, detect/ (config auto-detection)
 extractor/  MyBatisXmlExtractor, SqlFileExtractor
-server/     MCP 서버, 도구, Workspace(여러 프로젝트), CLI, Installer, 실행 스크립트(src/launcher)
-npm/        npm 런처 (npx sqlgraph-mcp): OS 별 배포 zip 다운로드·캐시·실행
-samples/    hr-project (sqlgraph.yml + DDL), spring-hr (application.yml 자동 탐지)
+server/     MCP server, tools, Workspace (multiple projects), CLI, Installer, launch scripts (src/launcher)
+npm/        npm launcher (npx sqlgraph-mcp): downloads, caches and runs the per-OS distribution zip
+samples/    hr-project (sqlgraph.yml + DDL), spring-hr (application.yml auto-detection)
 ```
 
-## 라이선스
+## License
 
 MIT — [LICENSE](LICENSE)
