@@ -165,4 +165,94 @@ class MyBatisXmlExtractorTest {
         assertTrue(s.variants().contains("SELECT 1 FROM T3"), s.variants().toString());
         assertTrue(s.variants().contains("SELECT 1 FROM T4"), s.variants().toString());
     }
+
+    @Test
+    void lineCommentDoesNotSwallowRestOfSql() {
+        String xml = """
+                <mapper namespace="a.C">
+                  <select id="withComment">
+                    SELECT E.EMP_NO   -- 사번
+                         , D.DEPT_NM  -- 부서명 (it's ok)
+                      FROM HR_EMP E
+                      -- 부서 조인
+                      JOIN HR_DEPT D ON D.DEPT_CD = E.DEPT_CD
+                     WHERE E.MEMO != '--not a comment'
+                  </select>
+                </mapper>""";
+        ExtractedSql e = run(xml).get("a.C.withComment");
+        assertTrue(e.sql().contains("/* 사번 */"), "주석은 보이게 남김: " + e.sql());
+        assertTrue(e.sql().contains("'--not a comment'"), "문자열 안의 -- 는 그대로");
+        var a = new io.sqlgraph.core.analyze.SqlAnalyzer().analyze(e.sql());
+        assertTrue(a.parsed(), a.error());
+        assertEquals(java.util.Set.of("HR_EMP", "HR_DEPT"),
+                a.tables().stream().map(io.sqlgraph.core.model.TableRef::name).collect(Collectors.toSet()),
+                "-- 주석 뒤의 FROM/JOIN 이 빠지면 안 됨");
+    }
+
+    @Test
+    void mutuallyExclusiveIfsBecomeBranches() {
+        String xml = """
+                <mapper namespace="a.D">
+                  <sql id="orgTree">
+                    WITH RECURSIVE ORG_TREE AS (
+                    <if test='includeSub != null and includeSub == "Y"'>
+                      SELECT CO, ORG FROM ORG_M WHERE CO = #{co}
+                      UNION ALL
+                      SELECT B.CO, B.ORG FROM ORG_TREE A JOIN ORG_M B ON A.ORG = B.ORG_UP
+                    </if>
+                    <if test="includeSub == null or includeSub == ''">
+                      SELECT CO, ORG FROM ORG_ONLY WHERE CO = #{co}
+                    </if>
+                    )
+                  </sql>
+                  <select id="chart">
+                    <include refid="orgTree"/>
+                    SELECT E.ORG, COUNT(*) FROM EMP E JOIN ORG_TREE T ON T.ORG = E.ORG GROUP BY E.ORG
+                  </select>
+                </mapper>""";
+        ExtractedSql e = run(xml).get("a.D.chart");
+        assertFalse(e.sql().contains("ORG_ONLY"), "본 SQL 은 첫 분기만: " + e.sql());
+        assertEquals(1, e.variants().size());
+        assertTrue(e.variants().get(0).contains("ORG_ONLY"));
+        var an = new io.sqlgraph.core.analyze.SqlAnalyzer();
+        assertTrue(an.analyze(e.sql()).parsed(), an.analyze(e.sql()).error());
+        assertTrue(an.analyze(e.variants().get(0)).parsed());
+    }
+
+    @Test
+    void independentIfsStayTogether() {
+        String xml = """
+                <mapper namespace="a.E">
+                  <select id="list">
+                    SELECT A FROM T WHERE 1=1
+                    <if test="x != null">AND X = #{x}</if>
+                    <if test="y != null">AND Y = #{y}</if>
+                  </select>
+                </mapper>""";
+        ExtractedSql e = run(xml).get("a.E.list");
+        assertTrue(e.sql().contains("X = #{x}") && e.sql().contains("Y = #{y}"), e.sql());
+        assertTrue(e.variants().isEmpty());
+    }
+
+    @Test
+    void complementaryNullChecksAreExclusive() {
+        String xml = """
+                <mapper namespace="a.F">
+                  <delete id="del">
+                    DELETE FROM TASK_LOG WHERE ID NOT IN (SELECT MIN(ID) FROM TASK_LOG WHERE TASK_ID = #{taskId}
+                      <if test="step != null and step != ''">AND STEP = #{step}</if>
+                      <if test="step == null or step == ''">AND STEP IS NULL</if>
+                    )
+                  </delete>
+                  <select id="mixedOr">
+                    SELECT A FROM T WHERE 1=1
+                    <if test="x == 'A' or y == 'B'">AND P = 1</if>
+                    <if test="x == 'C'">AND Q = 2</if>
+                  </select>
+                </mapper>""";
+        var m = run(xml);
+        assertEquals(1, m.get("a.F.del").variants().size(), m.get("a.F.del").sql());
+        assertTrue(m.get("a.F.mixedOr").variants().isEmpty(), "다른 변수를 or 로 엮으면 배타적이라고 볼 수 없음");
+        assertTrue(m.get("a.F.mixedOr").sql().contains("P = 1") && m.get("a.F.mixedOr").sql().contains("Q = 2"));
+    }
 }

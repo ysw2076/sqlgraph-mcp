@@ -1,5 +1,6 @@
 package io.sqlgraph.extractor;
 
+import io.sqlgraph.core.SqlComments;
 import io.sqlgraph.core.model.ExtractedSql;
 import io.sqlgraph.core.model.SourceLocation;
 import io.sqlgraph.core.model.SqlKind;
@@ -220,11 +221,114 @@ public final class MyBatisXmlExtractor implements SqlExtractor {
             Node k = kids.item(i);
             switch (k.getNodeType()) {
                 case Node.TEXT_NODE, Node.CDATA_SECTION_NODE -> sb.append(ctx.substitute(k.getNodeValue()));
-                case Node.ELEMENT_NODE -> sb.append(' ').append(renderElement((Element) k, ctx)).append(' ');
+                case Node.ELEMENT_NODE -> {
+                    List<Integer> group = exclusiveIfGroup(kids, i);
+                    if (group.size() > 1) {
+                        // <if test='x == "Y"'>…</if><if test="x == null">…</if> : 둘 다 참일 수 없으므로 choose 처럼 분기
+                        ctx.maxBranches = Math.max(ctx.maxBranches, group.size());
+                        int pick = group.get(Math.min(ctx.branch, group.size() - 1));
+                        sb.append(' ').append(renderElement((Element) kids.item(pick), ctx)).append(' ');
+                        i = group.get(group.size() - 1);
+                    } else {
+                        sb.append(' ').append(renderElement((Element) k, ctx)).append(' ');
+                    }
+                }
                 default -> { }
             }
         }
         return sb.toString();
+    }
+
+    private static final Pattern EQ_TEST = Pattern.compile(
+            "([A-Za-z_][\\w.]*)\\s*(==|!=|\\beq\\b|\\bneq\\b)\\s*('[^']*'|\"[^\"]*\"|null|-?\\d+(?:\\.\\d+)?)"
+                    + "|('[^']*'|\"[^\"]*\")\\s*(==|\\beq\\b)\\s*([A-Za-z_][\\w.]*)"
+                    + "|('[^']*'|\"[^\"]*\")\\.equals\\(\\s*([A-Za-z_][\\w.]*)\\s*\\)"
+                    + "|([A-Za-z_][\\w.]*)\\.equals\\(\\s*('[^']*'|\"[^\"]*\")\\s*\\)");
+    private static final Pattern OR = Pattern.compile("(?i)\\s(or)\\s|\\|\\|");
+    private static final Pattern VAR = Pattern.compile("(?<![\\w.'\"])([A-Za-z_][\\w.]*)(?![\\w('\"])");
+    private static final java.util.Set<String> OGNL_WORDS = java.util.Set.of("null", "and", "or", "eq", "neq", "true", "false", "not");
+
+    /** test 식의 비교. eq: 변수 == 값, neq: 변수 != 값 (값은 따옴표를 뗀 문자열, null 은 "null") */
+    private record Cmp(Map<String, java.util.Set<String>> eq, Map<String, java.util.Set<String>> neq) {
+        boolean isEmpty() {
+            return eq.isEmpty() && neq.isEmpty();
+        }
+    }
+
+    /**
+     * kids[i] 부터 공백만 사이에 둔 연속 &lt;if&gt; 중, 같은 변수를 서로 다른 값과 == 로 비교해서
+     * 동시에 참일 수 없는 것들의 위치. 묶을 것이 없으면 [i] 하나.
+     */
+    private static List<Integer> exclusiveIfGroup(NodeList kids, int i) {
+        List<Integer> group = new ArrayList<>();
+        group.add(i);
+        if (!(kids.item(i) instanceof Element first) || !first.getTagName().equals("if")) return group;
+        List<Cmp> tests = new ArrayList<>();
+        Cmp c0 = comparisons(first.getAttribute("test"));
+        if (c0 == null || c0.isEmpty()) return group;
+        tests.add(c0);
+        for (int j = i + 1; j < kids.getLength(); j++) {
+            Node n = kids.item(j);
+            if (n.getNodeType() == Node.TEXT_NODE && n.getNodeValue().isBlank()) continue;
+            if (n.getNodeType() == Node.COMMENT_NODE) continue;
+            if (!(n instanceof Element el) || !el.getTagName().equals("if")) break;
+            Cmp c = comparisons(el.getAttribute("test"));
+            boolean exclusiveWithAll = c != null && !c.isEmpty() && tests.stream().allMatch(t -> exclusive(t, c));
+            if (!exclusiveWithAll) break;
+            tests.add(c);
+            group.add(j);
+        }
+        return group;
+    }
+
+    /**
+     * test 식의 비교들. or 로 서로 다른 변수를 엮은 식(x == 'A' or y == 'B')은 배타성을 판단할 수 없으므로 null.
+     */
+    private static Cmp comparisons(String test) {
+        if (test == null) return null;
+        if (OR.matcher(test).find()) {
+            java.util.Set<String> vars = new java.util.HashSet<>();
+            Matcher v = VAR.matcher(test.replaceAll("'[^']*'|\"[^\"]*\"", " "));
+            while (v.find()) if (!OGNL_WORDS.contains(v.group(1).toLowerCase(Locale.ROOT))) vars.add(v.group(1));
+            if (vars.size() > 1) return null;
+        }
+        Map<String, java.util.Set<String>> eq = new HashMap<>();
+        Map<String, java.util.Set<String>> neq = new HashMap<>();
+        Matcher x = EQ_TEST.matcher(test);
+        while (x.find()) {
+            String var;
+            String val;
+            boolean not = false;
+            if (x.group(1) != null) {
+                var = x.group(1);
+                val = x.group(3);
+                not = x.group(2).equals("!=") || x.group(2).equals("neq");
+            } else if (x.group(4) != null) { var = x.group(6); val = x.group(4); }
+            else if (x.group(7) != null) { var = x.group(8); val = x.group(7); }
+            else { var = x.group(9); val = x.group(10); }
+            if (val.length() >= 2 && (val.startsWith("'") || val.startsWith("\""))) val = val.substring(1, val.length() - 1);
+            (not ? neq : eq).computeIfAbsent(var, k -> new java.util.HashSet<>()).add(val);
+        }
+        return new Cmp(eq, neq);
+    }
+
+    /**
+     * 같은 변수에 대해 (1) 양쪽 == 값이 하나도 겹치지 않거나 (x == 'Y' / x == null)
+     * (2) 한쪽의 == 값을 다른 쪽이 != 로 모두 배제하면 (x == null or x == '' / x != null and x != '') 배타적.
+     */
+    private static boolean exclusive(Cmp a, Cmp b) {
+        java.util.Set<String> vars = new java.util.HashSet<>(a.eq().keySet());
+        vars.addAll(a.neq().keySet());
+        for (String v : vars) {
+            java.util.Set<String> ae = a.eq().get(v);
+            java.util.Set<String> be = b.eq().get(v);
+            if (ae != null && be != null && java.util.Collections.disjoint(ae, be)) return true;
+            java.util.Set<String> an = a.neq().get(v);
+            java.util.Set<String> bn = b.neq().get(v);
+            if (ae != null && bn != null && bn.containsAll(ae)) return true;
+            if (be != null && an != null && an.containsAll(be)) return true;
+        }
+        return false;
     }
 
     private String renderElement(Element e, Ctx ctx) {
@@ -352,8 +456,9 @@ public final class MyBatisXmlExtractor implements SqlExtractor {
         return m.find() ? s.substring(m.end()).strip() : s.strip();
     }
 
+    /** 한 줄로 합친다. -- 주석은 먼저 블록 주석으로 바꿔서, 합친 뒤 뒤쪽 SQL 이 주석이 되지 않게 한다 */
     private static String clean(String sql) {
-        return sql.replaceAll("\\s+", " ").strip();
+        return SqlComments.lineToBlock(sql).replaceAll("\\s+", " ").strip();
     }
 
     // ----------------------------------------------------------------- utils

@@ -91,8 +91,11 @@ public final class Tools {
                 }), "from"));
         ((ObjectNode) tools.get(tools.size() - 1).get("inputSchema")).withArray("required").add("to");
         tools.add(tool("index_status",
-                "인덱스 상태: 마지막 인덱싱 시각, 연결한 DB, 테이블/쿼리 수, 파싱 실패 샘플, DB 메타데이터에 없는 테이블 목록.",
-                props(p -> p.set("project", PROJECT_PROP)), null));
+                "인덱스 상태: 마지막 인덱싱 시각, 연결한 DB, 테이블/쿼리 수, 파싱 실패 유형/폴더별 집계와 목록, DB 메타데이터에 없는 테이블 목록.",
+                props(p -> {
+                    p.set("project", PROJECT_PROP);
+                    p.set("failures", prop("integer", "파싱 실패 쿼리를 몇 건까지 나열할지 (기본 5, 최대 500)"));
+                }), null));
         return tools;
     }
 
@@ -142,7 +145,7 @@ public final class Tools {
             case "impact_analysis" -> impact(svc(a), req(a, "table"), opt(a, "column"), a.path("limit").asInt(50));
             case "find_query" -> findQuery(svc(a), req(a, "keyword"), a.path("limit").asInt(10),
                     a.path("full_sql").asBoolean(false));
-            case "index_status" -> status(svc(a));
+            case "index_status" -> status(svc(a), a.path("failures").asInt(5));
             case "find_join_path" -> findJoinPath(svc(a), req(a, "from"), req(a, "to"), a.path("max_hops").asInt(4));
             default -> throw new IllegalArgumentException("알 수 없는 도구: " + name);
         };
@@ -300,6 +303,10 @@ public final class Tools {
     }
 
     String status(SqlGraphService svc) throws Exception {
+        return status(svc, 5);
+    }
+
+    String status(SqlGraphService svc, int failures) throws Exception {
         GraphStore st = svc.store();
         Map<String, String> meta = st.meta();
         Map<String, Integer> c = st.counts();
@@ -325,9 +332,17 @@ public final class Tools {
         }
         String warn = meta.get("warnings");
         if (warn != null && !warn.isBlank()) sb.append("\n경고:\n").append(warn.lines().map(l -> "- " + l + "\n").reduce("", String::concat));
-        List<StmtDetail> failed = st.failedSamples(5);
+        List<StmtDetail> failed = st.failedSamples(clamp(failures, 0, 500));
         if (!failed.isEmpty()) {
-            sb.append("\n파싱 실패 샘플 (테이블은 정규식으로 추출됨):\n");
+            sb.append("\n파싱 실패 유형 (건수, 예시 위치):\n");
+            for (var e : st.failureKinds(10).entrySet()) {
+                sb.append("- ").append(e.getValue()[0]).append("건: ").append(e.getKey())
+                        .append("  (예: ").append(e.getValue()[1]).append(")\n");
+            }
+            sb.append("\n파싱 실패가 많은 폴더: ");
+            sb.append(String.join(", ", st.failureFolders(8).entrySet().stream()
+                    .map(e -> e.getKey() + " (" + e.getValue() + ")").toList())).append('\n');
+            sb.append("\n파싱 실패 쿼리 (테이블은 정규식으로 추출됨").append(failures <= 5 ? ", failures 로 더 보기" : "").append("):\n");
             for (StmtDetail d : failed) {
                 sb.append("- ").append(d.owner()).append(" (").append(d.file()).append(":").append(d.line())
                         .append("): ").append(nz(d.error())).append('\n');

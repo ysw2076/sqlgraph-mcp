@@ -194,4 +194,23 @@ class SqlAnalyzerTest {
                 WHERE NOT EXISTS (SELECT 1 FROM HR_APPNT a WHERE a.EMP_NO = e.EMP_NO)""")));
         assertTrue(an.analyze("SELECT 1 FROM T a WHERE a.X = a.Y").joins().isEmpty(), "같은 별칭 안 비교는 관계 아님");
     }
+
+    @Test
+    void orderByGroupByAndWindowColumnsAreCollected() {
+        AnalyzedSql a = an.analyze("""
+                SELECT DEPT_CD, COUNT(*) CNT, ROW_NUMBER() OVER (PARTITION BY GRADE_CD ORDER BY HIRE_DT) RN
+                  FROM HR_EMP GROUP BY DEPT_CD, GRADE_CD HAVING MAX(SAL_AMT) > 0 ORDER BY SORT_ORD, CNT, 1""");
+        assertTrue(a.parsed(), a.error());
+        java.util.Set<String> cols = a.columns().stream().map(ColumnRef::column).collect(java.util.stream.Collectors.toSet());
+        assertTrue(cols.containsAll(java.util.Set.of("DEPT_CD", "GRADE_CD", "HIRE_DT", "SAL_AMT", "SORT_ORD")), cols.toString());
+        assertFalse(cols.contains("CNT"), "선택 목록 별칭은 컬럼이 아님");
+        assertFalse(cols.contains("RN"));
+    }
+
+    @Test
+    void commentsAnywhereAreIgnoredForParsing() {
+        AnalyzedSql a = an.analyze("SELECT A /* 이름 */ FROM T1 /* 조인 */ JOIN T2 ON T2.K = T1.K WHERE T1.X = '/* not */' /* 끝 */");
+        assertTrue(a.parsed(), a.error());
+        assertEquals(2, a.tables().size());
+    }
 }

@@ -1,5 +1,6 @@
 package io.sqlgraph.extractor;
 
+import io.sqlgraph.core.SqlComments;
 import io.sqlgraph.core.SqlScripts;
 import io.sqlgraph.core.model.ExtractedSql;
 import io.sqlgraph.core.model.SourceLocation;
@@ -34,7 +35,7 @@ public final class SqlFileExtractor implements SqlExtractor {
             SqlKind kind = SqlKind.guess(c.sql());
             if (kind == SqlKind.DDL || kind == SqlKind.OTHER) continue;
             seq++;
-            out.add(new ExtractedSql(c.sql().replaceAll("\\s+", " ").strip(), relativePath + "#" + seq, kind,
+            out.add(new ExtractedSql(SqlComments.lineToBlock(c.sql()).replaceAll("\\s+", " ").strip(), relativePath + "#" + seq, kind,
                     new SourceLocation(relativePath, c.line()), c.sql().contains("${") || c.sql().matches("(?s).*&&?[A-Za-z_].*")));
         }
         return out;

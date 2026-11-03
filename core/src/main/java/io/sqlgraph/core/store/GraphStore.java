@@ -626,6 +626,54 @@ public final class GraphStore implements AutoCloseable {
         return r;
     }
 
+    /**
+     * 파싱 실패를 오류 유형별로 센다 (줄·열 번호와 "Was expecting ..." 목록을 지운 메시지 기준).
+     * @return 유형 → {건수, 예시 위치}
+     */
+    public Map<String, String[]> failureKinds(int limit) throws SQLException {
+        Map<String, int[]> counts = new java.util.HashMap<>();
+        Map<String, String> example = new java.util.HashMap<>();
+        try (Statement s = conn.createStatement(); ResultSet rs = s.executeQuery(
+                "SELECT error, file, line FROM stmt WHERE parsed = 0")) {
+            while (rs.next()) {
+                String k = errorKind(rs.getString(1));
+                counts.computeIfAbsent(k, x -> new int[1])[0]++;
+                example.putIfAbsent(k, rs.getString(2) + ":" + rs.getInt(3));
+            }
+        }
+        Map<String, String[]> out = new LinkedHashMap<>();
+        counts.entrySet().stream()
+                .sorted((a, b) -> Integer.compare(b.getValue()[0], a.getValue()[0]))
+                .limit(limit)
+                .forEach(e -> out.put(e.getKey(), new String[]{String.valueOf(e.getValue()[0]), example.get(e.getKey())}));
+        return out;
+    }
+
+    /** 파싱 실패가 많은 폴더 (경로 앞 3단계) */
+    public Map<String, Integer> failureFolders(int limit) throws SQLException {
+        Map<String, Integer> counts = new java.util.HashMap<>();
+        try (Statement s = conn.createStatement(); ResultSet rs = s.executeQuery("SELECT file FROM stmt WHERE parsed = 0")) {
+            while (rs.next()) {
+                String f = rs.getString(1);
+                String[] p = f == null ? new String[0] : f.split("/");
+                String dir = String.join("/", java.util.Arrays.copyOf(p, Math.min(3, Math.max(0, p.length - 1))));
+                counts.merge(dir.isEmpty() ? "." : dir, 1, Integer::sum);
+            }
+        }
+        Map<String, Integer> out = new LinkedHashMap<>();
+        counts.entrySet().stream().sorted((a, b) -> Integer.compare(b.getValue(), a.getValue())).limit(limit)
+                .forEach(e -> out.put(e.getKey(), e.getValue()));
+        return out;
+    }
+
+    static String errorKind(String error) {
+        if (error == null) return "(사유 없음)";
+        String e = error.replaceAll("(?i)\\s*at line \\d+, column \\d+\\.?", "")
+                .replaceAll("(?s)\\s*Was expecting.*$", "")
+                .replaceAll("\\s+", " ").strip();
+        return e.length() > 90 ? e.substring(0, 90) + "…" : e;
+    }
+
     /** 파싱 실패 쿼리 샘플 */
     public List<StmtDetail> failedSamples(int limit) throws SQLException {
         List<StmtDetail> r = new ArrayList<>();

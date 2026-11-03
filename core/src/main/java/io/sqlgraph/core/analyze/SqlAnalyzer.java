@@ -1,12 +1,15 @@
 package io.sqlgraph.core.analyze;
 
 import io.sqlgraph.core.Names;
+import io.sqlgraph.core.SqlComments;
 import io.sqlgraph.core.model.Access;
 import io.sqlgraph.core.model.AnalyzedSql;
 import io.sqlgraph.core.model.ColumnRef;
 import io.sqlgraph.core.model.JoinRef;
 import io.sqlgraph.core.model.SqlKind;
 import io.sqlgraph.core.model.TableRef;
+import net.sf.jsqlparser.expression.AnalyticExpression;
+import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.expression.LongValue;
 import net.sf.jsqlparser.expression.StringValue;
 import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
@@ -20,8 +23,11 @@ import net.sf.jsqlparser.statement.insert.Insert;
 import net.sf.jsqlparser.statement.merge.Merge;
 import net.sf.jsqlparser.statement.select.AllColumns;
 import net.sf.jsqlparser.statement.select.AllTableColumns;
+import net.sf.jsqlparser.statement.select.OrderByElement;
+import net.sf.jsqlparser.statement.select.PlainSelect;
 import net.sf.jsqlparser.statement.select.Select;
 import net.sf.jsqlparser.statement.select.SelectItem;
+import net.sf.jsqlparser.statement.select.SetOperationList;
 import net.sf.jsqlparser.statement.update.Update;
 import net.sf.jsqlparser.statement.update.UpdateSet;
 import net.sf.jsqlparser.statement.upsert.Upsert;
@@ -68,23 +74,79 @@ public final class SqlAnalyzer {
     private static final Set<String> FALLBACK_STOP = Set.of(
             "SELECT", "WHERE", "SET", "VALUES", "DUAL", "TABLE", "LATERAL", "UNNEST", DYN);
 
+    /** 테이블을 다루지 않는 세션·트랜잭션 문장 (SET SESSION .., USE db, COMMIT …) */
+    private static final Pattern NO_TABLE_STATEMENT = Pattern.compile(
+            "(?is)^(SET\\s+(?!.*\\bWHERE\\b)|USE\\s+\\w+$|COMMIT\\b|ROLLBACK\\b|UNLOCK\\s+TABLES\\b|SAVEPOINT\\b|RELEASE\\s+SAVEPOINT\\b).*");
+
     public AnalyzedSql analyze(String sql) {
         String cleaned = normalize(sql);
         if (SqlKind.guess(cleaned) == SqlKind.CALL) {
             // 프로시저 호출은 테이블을 직접 참조하지 않는다 (본문은 DB 쪽). 파싱 실패로 세지 않음
             return new AnalyzedSql(SqlKind.CALL, true, null, List.of(), List.of(), false, List.of());
         }
+        if (NO_TABLE_STATEMENT.matcher(cleaned).matches()) {
+            return new AnalyzedSql(SqlKind.OTHER, true, null, List.of(), List.of(), false, List.of());
+        }
         try {
             Statement st = CCJSqlParserUtil.parse(cleaned, p -> p.withTimeOut(PARSE_TIMEOUT_MS));
             return fromStatement(st);
         } catch (Throwable e) {
-            return fallback(cleaned, shortError(e));
+            // 2차: 방언(MySQL 등) 표현을 분석에 지장 없는 형태로 바꾸고, 백슬래시 이스케이프·긴 시간 제한으로 다시
+            String relaxed = relax(cleaned);
+            try {
+                Statement st = CCJSqlParserUtil.parse(relaxed,
+                        p -> p.withTimeOut(RETRY_TIMEOUT_MS).withBackslashEscapeCharacter(true));
+                return fromStatement(st);
+            } catch (Throwable e2) {
+                return fallback(cleaned, shortError(e));
+            }
         }
+    }
+
+    private static final long RETRY_TIMEOUT_MS = 20_000;
+
+    private static final String UNIT = "(?:MICROSECOND|SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|QUARTER|YEAR"
+            + "|SECOND_MICROSECOND|MINUTE_SECOND|HOUR_MINUTE|DAY_HOUR|DAY_MINUTE|DAY_SECOND|YEAR_MONTH)";
+    private static final String TYPES = "(?:DECIMAL|NUMERIC|SIGNED|UNSIGNED|CHAR|NCHAR|VARCHAR|NVARCHAR|VARCHAR2|DATE|DATETIME"
+            + "|TIMESTAMP|TIME|INT|INTEGER|BIGINT|SMALLINT|NUMBER|DOUBLE|FLOAT|REAL|BINARY|JSON|TEXT|CLOB|BLOB|BOOLEAN)";
+    private static final Pattern[] RELAX_FROM = {
+            Pattern.compile("\\|\\|"),                                                    // MySQL 논리 OR
+            Pattern.compile("(\\w)\\.(\\d+[A-Za-z_]\\w*)"),                                // t.4QTR_AMT (숫자로 시작하는 컬럼명)
+            Pattern.compile("\\b\\d{19,}\\b"),                                            // LIMIT 18446744073709551615
+            Pattern.compile("(?i)\\bINTERVAL\\s+"),
+            Pattern.compile("(?i)(\\)|\\w|')\\s+" + UNIT + "\\s*\\)"),                    // DATE_ADD(x, n DAY) 의 단위
+            Pattern.compile("(?i)\\bDIV\\b"),
+            Pattern.compile("(?i)\\bDELETE\\s+(\\w+)\\.\\*\\s+FROM\\b"),                  // DELETE t.* FROM
+            Pattern.compile("(?i)\\bSEPARATOR\\s+'(?:[^']|'')*'"),                        // GROUP_CONCAT(.. SEPARATOR ',')
+            // 예약어 별칭 (AS START). CAST(x AS DECIMAL(10,2)) 의 타입과 함수 호출은 제외
+            Pattern.compile("(?i)\\bAS\\s+(?!" + TYPES + "\\b)([A-Za-z_\\p{L}][\\w\\p{L}]*)(?!\\s*\\()"),
+            // 예약어 테이블명 (FROM SAMPLE). TRIM(.. FROM TRIM(..)) 같은 함수 호출은 제외
+            Pattern.compile("(?i)\\b(FROM|JOIN|UPDATE)\\s+(?!SELECT\\b|LATERAL\\b|DUAL\\b)([A-Za-z_][\\w$]*)(?=\\s|,|$)(?!\\s*\\()"),
+            Pattern.compile("(?i)\\b(INTO)\\s+([A-Za-z_][\\w$]*)(?=\\s|\\(|$)"),
+            Pattern.compile("(?<=[\\s,(]|^)" + DYN + "(?=[\\s,)]|$)"),                   // 홀로 있는 ${..} 조각
+    };
+    private static final String[] RELAX_TO = {
+            " OR ", "$1.`$2`", "999999999", "", "$1)", "/", "DELETE $1 FROM", "", "AS `$1`",
+            "$1 `$2`", "$1 `$2`", " ",
+    };
+
+    /** 1차 파싱이 실패했을 때만 쓰는 보정 (분석 결과의 테이블·컬럼은 그대로 두고 문법만 맞춘다) */
+    static String relax(String sql) {
+        String s = sql;
+        for (int k = 0; k < RELAX_FROM.length; k++) s = RELAX_FROM[k].matcher(s).replaceAll(RELAX_TO[k]);
+        // ${..} 조각을 지운 자리 정리
+        s = s.replaceAll(",\\s*(?=,|\\)|(?i:FROM|WHERE)\\b)", " ")
+                .replaceAll("\\(\\s*,", "(")
+                .replaceAll("(?i)\\bSET\\s*,", "SET ")
+                .replaceAll("(?i)\\b(WHERE|AND|OR)\\s+(AND|OR)\\b", "$1")
+                .replaceAll("(?i)\\b(WHERE|AND|OR)\\s*(?=\\)|$|ORDER\\b|GROUP\\b|LIMIT\\b|UNION\\b)", "");
+        return s;
     }
 
     /** 바인드 변수/동적 요소를 파싱 가능한 형태로 바꾼다. */
     public static String normalize(String sql) {
-        String s = sql == null ? "" : sql;
+        String s = sql == null ? "" : SqlComments.strip(sql);   // 끝에 붙은 주석은 JSqlParser 가 파싱하지 못함
+        s = s.replaceAll("[\\u00A0\\u2000-\\u200B\\u3000\\uFEFF]", " ");   // NBSP·전각 공백 등은 SQL 에서 공백
         s = MYBATIS_BIND.matcher(s).replaceAll("?");
         s = MYBATIS_RAW.matcher(s).replaceAll(DYN);
         s = IBATIS_BIND.matcher(s).replaceAll("?");
@@ -325,6 +387,60 @@ public final class SqlAnalyzer {
             Object e = item.getExpression();
             if (e instanceof AllColumns || e instanceof AllTableColumns) selectsAll = true;
             super.visit(item);
+        }
+
+        /**
+         * TablesNamesFinder 는 GROUP BY / HAVING / ORDER BY 의 컬럼을 방문하지 않는다.
+         * 정렬·그룹핑에만 쓰인 컬럼도 영향도 분석에 나와야 하므로 직접 방문한다.
+         */
+        @Override
+        public void visit(PlainSelect ps) {
+            super.visit(ps);
+            Set<String> aliases = new java.util.HashSet<>();
+            if (ps.getSelectItems() != null) {
+                for (SelectItem<?> si : ps.getSelectItems()) {
+                    if (si.getAlias() != null) aliases.add(Names.key(si.getAlias().getName()));
+                }
+            }
+            if (ps.getGroupBy() != null && ps.getGroupBy().getGroupByExpressionList() != null) {
+                for (Object e : ps.getGroupBy().getGroupByExpressionList()) visitExtra((Expression) e, aliases);
+            }
+            if (ps.getHaving() != null) visitExtra(ps.getHaving(), aliases);
+            orderBy(ps.getOrderByElements(), aliases);
+        }
+
+        @Override
+        public void visit(SetOperationList list) {
+            super.visit(list);
+            orderBy(list.getOrderByElements(), Set.of());
+        }
+
+        /** 윈도 함수 OVER (PARTITION BY .. ORDER BY ..) */
+        @Override
+        public void visit(AnalyticExpression a) {
+            try {
+                super.visit(a);
+            } catch (NullPointerException npe) {
+                // JSqlParser 4.9: ROWS BETWEEN UNBOUNDED PRECEDING .. 처럼 경계 식이 없으면 NPE. 인자만 직접 방문
+                if (a.getExpression() != null) a.getExpression().accept(this);
+            }
+            if (a.getPartitionExpressionList() != null) {
+                for (Object e : a.getPartitionExpressionList()) visitExtra((Expression) e, Set.of());
+            }
+            orderBy(a.getOrderByElements(), Set.of());
+        }
+
+        private void orderBy(List<OrderByElement> elems, Set<String> aliases) {
+            if (elems == null) return;
+            for (OrderByElement o : elems) visitExtra(o.getExpression(), aliases);
+        }
+
+        /** 선택 목록 별칭(ORDER BY CNT) 은 컬럼이 아니므로 건너뛴다 */
+        private void visitExtra(Expression e, Set<String> aliases) {
+            if (e == null) return;
+            if (e instanceof Column c && c.getTable() == null && aliases.contains(Names.key(c.getColumnName()))) return;
+            if (e instanceof net.sf.jsqlparser.expression.LongValue) return;   // ORDER BY 1
+            e.accept(this);
         }
     }
 
