@@ -130,6 +130,9 @@ public final class JdbcSchemaSource implements SchemaSource {
                 }
             }
 
+            // SQL Server 는 코멘트를 확장 속성(MS_Description)에 두고 DatabaseMetaData 로는 주지 않는다
+            if (lower.startsWith("jdbc:sqlserver:")) sqlServerDescriptions(conn, schemaPattern, tableInfo, rawCols, warnings);
+
             // PK / FK (테이블별 조회)
             List<ForeignKey> fks = new ArrayList<>();
             Map<String, Set<String>> pks = new LinkedHashMap<>();
@@ -259,6 +262,38 @@ public final class JdbcSchemaSource implements SchemaSource {
         Connection c = driver.connect(url, props);
         if (c == null) throw new SQLException("드라이버가 URL 을 거부했습니다: " + url);
         return c;
+    }
+
+    /** sys.extended_properties 의 MS_Description 을 테이블·컬럼 코멘트로 채운다 (이미 값이 있으면 유지) */
+    private static void sqlServerDescriptions(Connection conn, String schema, Map<String, String[]> tableInfo,
+                                              Map<String, List<String[]>> rawCols, List<String> warnings) {
+        String sql = """
+                SELECT s.name, o.name, c.name, CAST(ep.value AS NVARCHAR(4000))
+                  FROM sys.extended_properties ep
+                  JOIN sys.objects o ON o.object_id = ep.major_id
+                  JOIN sys.schemas s ON s.schema_id = o.schema_id
+                  LEFT JOIN sys.columns c ON c.object_id = ep.major_id AND c.column_id = ep.minor_id
+                 WHERE ep.class = 1 AND ep.name = 'MS_Description'""";
+        try (var st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+            while (rs.next()) {
+                String sch = rs.getString(1);
+                if (schema != null && !schema.equalsIgnoreCase(sch)) continue;
+                String table = rs.getString(2);
+                String column = rs.getString(3);
+                String text = rs.getString(4);
+                String[] info = tableInfo.get(table);
+                if (info == null || text == null) continue;
+                if (column == null) {
+                    if (info[2] == null || info[2].isBlank()) info[2] = text;
+                    continue;
+                }
+                for (String[] c : rawCols.getOrDefault(table, List.of())) {
+                    if (c[0].equalsIgnoreCase(column) && (c[5] == null || c[5].isBlank())) c[5] = text;
+                }
+            }
+        } catch (SQLException e) {
+            warnings.add("SQL Server 코멘트(MS_Description) 조회 실패: " + e.getMessage());
+        }
     }
 
     /** DB 별 접속 타임아웃 속성 (사용자가 properties 로 준 값이 우선) */
