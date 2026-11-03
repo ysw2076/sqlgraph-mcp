@@ -11,6 +11,7 @@ import io.sqlgraph.core.spi.SqlExtractor;
 import io.sqlgraph.core.store.GraphStore;
 import io.sqlgraph.extractor.MyBatisXmlExtractor;
 import io.sqlgraph.extractor.SqlFileExtractor;
+import io.sqlgraph.extractor.code.CodeSqlExtractor;
 
 import java.io.IOException;
 import java.nio.file.FileSystems;
@@ -109,7 +110,7 @@ public final class SqlGraphService implements AutoCloseable {
             }
         }
 
-        List<SqlExtractor> extractors = List.of(new MyBatisXmlExtractor(), new SqlFileExtractor());
+        List<SqlExtractor> extractors = List.of(new MyBatisXmlExtractor(), new SqlFileExtractor(), new CodeSqlExtractor());
         Indexer.Options opt = new Indexer.Options(config.project(), config.include(), config.exclude(),
                 config.maxFileBytes());
         Indexer.Report report = new Indexer(log).run(sources, extractors, opt, store());

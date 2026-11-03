@@ -45,7 +45,12 @@ public record Config(Path file, Path baseDir, Path project, Path index, List<Db>
                      String driverJar, String driverClass, String schema, List<String> files, String dialect,
                      Map<String, String> properties) {}
 
-    public static final List<String> DEFAULT_INCLUDE = List.of("**/*.xml", "**/*.sql");
+    /** Mapper XML, .sql, 프로그램 소스(코드 속 SQL·JPA), JPA 명명 규칙 확인용 Spring 설정 */
+    public static final List<String> DEFAULT_INCLUDE = List.of("**/*.xml", "**/*.sql",
+            "**/*.java", "**/*.kt", "**/*.kts", "**/*.scala", "**/*.groovy", "**/*.cs",
+            "**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.mjs", "**/*.cjs",
+            "**/*.go", "**/*.php", "**/*.py", "**/*.rb",
+            "**/application*.yml", "**/application*.yaml", "**/application*.properties");
     static final long DEFAULT_MAX_BYTES = 5L * 1024 * 1024;
 
     /** @param defaultIndex index 를 지정하지 않았을 때 쓸 위치 */
