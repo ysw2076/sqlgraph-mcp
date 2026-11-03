@@ -3,7 +3,8 @@
 **English** | [한국어](README.ko.md)
 
 A local MCP server that indexes your DB schema (tables, columns, comments, PKs, FKs)
-and the SQL in your source code (MyBatis/iBatis mapper XML, `.sql` files),
+and the SQL in your source code (MyBatis/iBatis mapper XML, `.sql` files, JPA `@Query`/JPQL,
+and SQL strings in Java, Kotlin, Python, JS/TS, Go, C#, PHP and Ruby code),
 so AI coding tools like Claude Code can look them up **in one call — no grep needed**.
 
 ```
@@ -88,9 +89,16 @@ Passwords never pass through the Claude conversation and never appear in tool re
 |---|---|
 | Spring Boot | `spring.datasource.*` and `*.jdbc-url` (multiple datasources) in `application*.yml` / `application*.properties`, `${ENV:default}` |
 | `.env` | `DATABASE_URL` (`postgres://`, `mysql://` …), Laravel-style `DB_CONNECTION` / `DB_HOST` / `DB_DATABASE` / `DB_USERNAME` / `DB_PASSWORD` |
+| Legacy Java | `*.url` / `username` / `password` in `*.properties` (`jdbc.properties`, eGovFrame `globals.properties` …), properties in Spring XML `<bean>`, `persistence.xml`, `hibernate.cfg.xml`, `mybatis-config.xml` (`${..}` resolved from the project's properties), Tomcat `context.xml` `<Resource>` |
+| Django | `DATABASES` in `settings.py`, `settings/local.py` … (`os.environ.get('X', 'default')` resolved) |
+| Rails | `config/database.yml` (ERB `ENV['X']` / `ENV.fetch` resolved, multiple databases) |
+| Node | Prisma `schema.prisma` (`env("DATABASE_URL")` → `.env`), Sequelize `config/config.json`, TypeORM `ormconfig.json` |
+| .NET | `ConnectionStrings` in `appsettings*.json` (SQL Server / PostgreSQL / MySQL connection strings) |
 
 - **Profile selection**: if the same DB is configured in several profiles, it picks `local` → `dev` → default, in that order.
   **If only `prod` or other profiles exist, it will not connect, to protect production databases.** If you need it, say "index with the prod profile".
+  The same rule applies to the other stacks: a file name (`settings/production.py`, `appsettings.Production.json`), environment key (`production:`)
+  or path (`config/prod/jdbc.properties`, `*-real.properties`) that points to production is never picked automatically.
 - Configs under `src/test` and in-memory DBs such as H2 are ignored. `log4jdbc` and `p6spy` wrapper URLs are converted back to the original URL.
 - If a password is encrypted (jasypt `ENC(...)`) or a `${...}` can't be resolved, set it via an environment variable:
   `SQLGRAPH_DB_PW` (all DBs) or `SQLGRAPH_DB_PW_<DB name>` (e.g. `SQLGRAPH_DB_PW_HR`).
@@ -190,7 +198,22 @@ DDL files (no DB access)             iBatis 2 SqlMap XML           query ─ tab
 - **Procedure calls** (`{call ...}`) are registered as queries, but tables inside the procedure aren't analyzed.
 - **Relationship inference**: requires a query with the join condition to exist in the source. Multiple relationships to the same target column
   (e.g. department before/after a transfer) are shown as separate relationships rather than merged. Joins inside procedure bodies aren't analyzed yet.
-- **Supported sources**: MyBatis/iBatis XML, `.sql`. JPA `@Query`, SQL strings in code and ORM models are planned.
+- **Mutually exclusive `<if>`s**: consecutive `<if>`s that compare the same variable to different values (`x == "Y"` / `x == null or x == ''`)
+  can't both be true, so they're expanded as branches, like `<choose>`.
+- **Comments**: `--` and MySQL `#` comments inside SQL are kept as block comments, so collapsing the SQL to one line doesn't comment out the rest.
+- **Dialect fallback**: when the first parse fails, MySQL `||` (OR), column names starting with a digit, `INTERVAL`, `DIV`, `DELETE t.* FROM`,
+  reserved-word aliases/table names, backslash escapes and the like are normalized and parsed again. Queries that still fail are grouped
+  by error kind and folder in `index_status` ("show me 50 parse failures" → `failures`).
+- **SQL in code** (Java, Kotlin, Scala, Groovy, C#, JS/TS, Go, PHP, Python, Ruby):
+  - Only string literals with SQL statement structure (SELECT…FROM, INSERT INTO, UPDATE…SET …) are extracted; English sentences ("Select a file from…") are not.
+  - `"SELECT .." + "FROM .."`, `StringBuilder.append(..)` chains and `sql += ".."` are joined into one statement;
+    variables and string interpolation (`${x}`, f-strings, `$var`) in between are marked as dynamic.
+  - The query id is `package.Class.method` (`file.function` for Python, JS and the like). MyBatis annotations (`@Select` …) and `<script>` are supported.
+  - Test code (`src/test`, `*Test.java`, `test_*.py`, `*.spec.ts` …) is skipped.
+- **JPA**: `@Entity`, `@Table`, `@Column`, `@JoinColumn`, `@Embedded` and `@MappedSuperclass` mappings are collected, and the JPQL in `@Query`, `createQuery`
+  and `@NamedQuery` is translated to real table/column SQL before analysis (path join `JOIN e.dept d` → `ON e.DEPT_CD = d.DEPT_CD`, `SELECT e` → all columns).
+  Unnamed entities/fields follow the Spring Boot default (snake_case), or keep their names when `PhysicalNamingStrategyStandardImpl` is configured.
+  `nativeQuery = true` and `createNativeQuery` are analyzed as SQL. Spring Data derived queries (`findByDeptCd`) aren't analyzed yet.
 - **Table matching** is by name (case-insensitive).
 
 ## Development
@@ -207,11 +230,14 @@ DDL files (no DB access)             iBatis 2 SqlMap XML           query ─ tab
 - Extension points: `io.sqlgraph.core.spi.SchemaSource` (DB input formats), `io.sqlgraph.core.spi.SqlExtractor` (languages/frameworks).
 - The MCP protocol is implemented directly, without the official SDK (stdio, JSON-RPC 2.0).
 - Uses JSqlParser 4.9. Version 5.x changed the visitor signatures, so `SqlAnalyzer.Collector` would need to be updated as well.
+- **Real-DB integration tests**: `.github/workflows/integration.yml` starts Oracle 23 Free / SQL Server 2022 / PostgreSQL 16 / MySQL 8.4 containers,
+  creates a schema (Korean comments, PK, FK, view) and indexes a mapper written in each dialect (`RealDbIT` in `server`).
+  Locally they run only when `SQLGRAPH_IT_<DB>_URL` / `_USER` / `_PASSWORD` are set.
 
 ```
-core/       model, SPI, SqlAnalyzer (JSqlParser), GraphStore (SQLite), Indexer
-connector/  JdbcSchemaSource, DdlSchemaSource, DriverResolver, detect/ (config auto-detection)
-extractor/  MyBatisXmlExtractor, SqlFileExtractor
+core/       model, SPI, SqlAnalyzer (JSqlParser), SqlComments, GraphStore (SQLite), Indexer
+connector/  JdbcSchemaSource, DdlSchemaSource, DriverResolver, detect/ (config auto-detection: Spring, .env, StackConfigs)
+extractor/  MyBatisXmlExtractor, SqlFileExtractor, code/ (SQL in code and JPA: CodeLexer, CodeSqlExtractor, JpaModel)
 server/     MCP server, tools, Workspace (multiple projects), CLI, Installer, launch scripts (src/launcher)
 npm/        npm launcher (npx sqlgraph-mcp): downloads, caches and runs the per-OS distribution zip
 samples/    hr-project (sqlgraph.yml + DDL), spring-hr (application.yml auto-detection)
