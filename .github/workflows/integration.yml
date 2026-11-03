@@ -81,7 +81,18 @@ jobs:
         run: |
           set -o pipefail
           ./gradlew :server:test --tests 'io.sqlgraph.server.RealDbIT' --no-daemon --stacktrace -i 2>&1 \
-            | grep -E '^\[(oracle|sqlserver|postgres|mysql)\]|RealDbIT|PASSED|FAILED|SKIPPED|Assertion|Exception' | tee it.log
+            | grep -E '^\s*\[(oracle|sqlserver|postgres|mysql)\] (Report|\[db\])|RealDbIT|FAILED|Assertion|Exception' | tee it.log
+      - name: Summary (DB 별 통과·건너뜀)
+        if: always()
+        run: |
+          f=server/build/test-results/test/TEST-io.sqlgraph.server.RealDbIT.xml
+          grep -o '<testsuite [^>]*' "$f" | grep -o '\(tests\|skipped\|failures\|errors\)="[0-9]*"' | tr '\n' ' '; echo
+          grep -o '<testcase name="[^"]*"' "$f" | sed 's/<testcase name=/case: /'
+          if grep -q '<skipped' "$f"; then echo "::error::실제 DB 테스트가 건너뛰어짐 (환경변수 확인)"; exit 1; fi
+          {
+            echo "### 실제 DB 통합 테스트"
+            grep -o '<testcase name="[^"]*"' "$f" | sed 's/<testcase name="\(.*\)"/- \1: 통과/'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Report failures
         if: failure()
         run: python3 .github/scripts/report_failures.py || true
