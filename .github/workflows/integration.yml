@@ -1,0 +1,87 @@
+# 실제 DB 서버 통합 테스트: Oracle 23 Free / SQL Server 2022 / PostgreSQL 16 / MySQL 8.4 컨테이너에
+# 테이블·뷰·한글 코멘트·PK·FK 를 만들고, 각 방언으로 쓴 Mapper 를 인덱싱해서 결과를 확인한다 (server RealDbIT).
+# 여기 비밀번호는 이 작업 안에서만 쓰고 버리는 컨테이너용 값이다.
+name: Integration (real DB)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-db:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      oracle:
+        image: gvenzl/oracle-free:23-slim-faststart
+        env:
+          ORACLE_PASSWORD: sqlgraph_sys_pw
+          APP_USER: sqlgraph
+          APP_USER_PASSWORD: sqlgraph_pw
+        ports: ["1521:1521"]
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s --health-timeout 10s --health-retries 40
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: Sqlgraph_Pw1
+        ports: ["1433:1433"]
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Sqlgraph_Pw1 -Q 'SELECT 1' || exit 1"
+          --health-interval 10s --health-timeout 10s --health-retries 30
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sqlgraph
+          POSTGRES_PASSWORD: sqlgraph_pw
+          POSTGRES_DB: sqlgraph
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sqlgraph"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: sqlgraph_root_pw
+          MYSQL_DATABASE: sqlgraph
+          MYSQL_USER: sqlgraph
+          MYSQL_PASSWORD: sqlgraph_pw
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -psqlgraph_root_pw"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+      - name: Real DB integration tests
+        env:
+          SQLGRAPH_IT_ORACLE_URL: jdbc:oracle:thin:@//localhost:1521/FREEPDB1
+          SQLGRAPH_IT_ORACLE_USER: sqlgraph
+          SQLGRAPH_IT_ORACLE_PASSWORD: sqlgraph_pw
+          SQLGRAPH_IT_SQLSERVER_URL: jdbc:sqlserver://localhost:1433;databaseName=sqlgraph_it;encrypt=false
+          SQLGRAPH_IT_SQLSERVER_USER: sa
+          SQLGRAPH_IT_SQLSERVER_PASSWORD: Sqlgraph_Pw1
+          SQLGRAPH_IT_POSTGRES_URL: jdbc:postgresql://localhost:5432/sqlgraph
+          SQLGRAPH_IT_POSTGRES_USER: sqlgraph
+          SQLGRAPH_IT_POSTGRES_PASSWORD: sqlgraph_pw
+          SQLGRAPH_IT_MYSQL_URL: jdbc:mysql://localhost:3306/sqlgraph?allowPublicKeyRetrieval=true&useSSL=false
+          SQLGRAPH_IT_MYSQL_USER: sqlgraph
+          SQLGRAPH_IT_MYSQL_PASSWORD: sqlgraph_pw
+        run: |
+          set -o pipefail
+          ./gradlew :server:test --tests 'io.sqlgraph.server.RealDbIT' --no-daemon --stacktrace -i 2>&1 \
+            | grep -E '^\[(oracle|sqlserver|postgres|mysql)\]|RealDbIT|PASSED|FAILED|SKIPPED|Assertion|Exception' | tee it.log
+      - name: Report failures
+        if: failure()
+        run: python3 .github/scripts/report_failures.py || true
