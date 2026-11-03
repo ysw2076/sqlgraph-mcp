@@ -71,6 +71,7 @@ public final class DbConfigDetector {
         List<String> notes = new ArrayList<>();
         List<Path> springFiles = new ArrayList<>();
         List<Path> envFiles = new ArrayList<>();
+        List<Map.Entry<StackConfigs.Kind, Path>> stackFiles = new ArrayList<>();
 
         Files.walkFileTree(root, Set.of(), MAX_DEPTH, new SimpleFileVisitor<>() {
             @Override
@@ -86,6 +87,10 @@ public final class DbConfigDetector {
                 String name = file.getFileName().toString();
                 if (SPRING_FILE.matcher(name).matches()) springFiles.add(file);
                 else if (name.equals(".env") || name.equals(".env.local") || name.equals(".env.development")) envFiles.add(file);
+                else if (attrs.size() <= MAX_STACK_FILE_BYTES) {
+                    StackConfigs.Kind k = StackConfigs.kindOf(rel(root, file), name);
+                    if (k != null) stackFiles.add(Map.entry(k, file));
+                }
                 return FileVisitResult.CONTINUE;
             }
 
@@ -104,15 +109,69 @@ public final class DbConfigDetector {
                 notes.add(rel(root, f) + " 읽기 실패: " + e.getMessage());
             }
         }
+        Map<String, String> dotenv = new LinkedHashMap<>();
         for (Path f : envFiles) {
             try {
                 all.addAll(fromEnvFile(root, f));
+                parseEnv(TextFiles.read(f)).forEach(dotenv::putIfAbsent);
             } catch (Exception e) {
                 notes.add(rel(root, f) + " 읽기 실패: " + e.getMessage());
             }
         }
+
+        // 다른 기술 스택: 값 해석은 환경변수 → .env → 프로젝트의 *.properties (Spring XML 의 ${jdbc.url} 등) 순
+        Map<String, String> projectProps = new LinkedHashMap<>();
+        for (var sf : stackFiles) {
+            if (sf.getKey() != StackConfigs.Kind.PROPERTIES) continue;
+            try {
+                Properties p = new Properties();
+                p.load(new StringReader(TextFiles.read(sf.getValue())));
+                for (String k : p.stringPropertyNames()) projectProps.putIfAbsent(k, p.getProperty(k).strip());
+            } catch (Exception ignore) {
+                // 읽지 못하는 properties 는 무시
+            }
+        }
+        StackConfigs.Lookup lookup = key -> {
+            String v = env.apply(key);
+            if (v == null) v = dotenv.get(key);
+            if (v == null) v = projectProps.get(key);
+            return v;
+        };
+        stackFiles.sort(Map.Entry.comparingByValue());
+        for (var sf : stackFiles) {
+            try {
+                all.addAll(StackConfigs.read(sf.getKey(), root, sf.getValue(), rel(root, sf.getValue()), lookup));
+            } catch (Exception e) {
+                notes.add(rel(root, sf.getValue()) + " 읽기 실패: " + e.getMessage());
+            }
+        }
         List<DetectedDb> chosen = choose(all, profile, notes);
         return new Result(all, chosen, notes);
+    }
+
+    /** 다른 기술 스택 설정 파일은 이 크기까지만 읽는다 */
+    private static final long MAX_STACK_FILE_BYTES = 512 * 1024;
+
+    /** .env 형식 → 키-값 */
+    static Map<String, String> parseEnv(String text) {
+        Map<String, String> vars = new LinkedHashMap<>();
+        for (String line : text.split("\\R")) {
+            String l = line.strip();
+            if (l.isEmpty() || l.startsWith("#")) continue;
+            if (l.startsWith("export ")) l = l.substring(7).strip();
+            int eq = l.indexOf('=');
+            if (eq <= 0) continue;
+            String k = l.substring(0, eq).strip();
+            String v = l.substring(eq + 1).strip();
+            if ((v.startsWith("\"") && v.endsWith("\"") && v.length() >= 2) || (v.startsWith("'") && v.endsWith("'") && v.length() >= 2)) {
+                v = v.substring(1, v.length() - 1);
+            } else {
+                int hash = v.indexOf(" #");
+                if (hash >= 0) v = v.substring(0, hash).strip();
+            }
+            vars.put(k, v);
+        }
+        return vars;
     }
 
     // ================================================================ Spring
@@ -243,23 +302,7 @@ public final class DbConfigDetector {
     // =================================================================== .env
 
     List<DetectedDb> fromEnvFile(Path root, Path file) throws IOException {
-        Map<String, String> vars = new LinkedHashMap<>();
-        for (String line : TextFiles.read(file).split("\\R")) {
-            String l = line.strip();
-            if (l.isEmpty() || l.startsWith("#")) continue;
-            if (l.startsWith("export ")) l = l.substring(7).strip();
-            int eq = l.indexOf('=');
-            if (eq <= 0) continue;
-            String k = l.substring(0, eq).strip();
-            String v = l.substring(eq + 1).strip();
-            if ((v.startsWith("\"") && v.endsWith("\"") && v.length() >= 2) || (v.startsWith("'") && v.endsWith("'") && v.length() >= 2)) {
-                v = v.substring(1, v.length() - 1);
-            } else {
-                int hash = v.indexOf(" #");
-                if (hash >= 0) v = v.substring(0, hash).strip();
-            }
-            vars.put(k, v);
-        }
+        Map<String, String> vars = parseEnv(TextFiles.read(file));
         String rel = rel(root, file);
         List<DetectedDb> out = new ArrayList<>();
         String dbUrl = vars.get("DATABASE_URL");
