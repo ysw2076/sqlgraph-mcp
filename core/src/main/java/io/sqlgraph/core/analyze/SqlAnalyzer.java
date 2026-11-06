@@ -217,6 +217,7 @@ public final class SqlAnalyzer {
             if (!realNames.contains(t.getFullyQualifiedName())) continue;   // CTE 등
             String name = Names.unquote(t.getName());
             if (name == null || name.contains(DYN)) continue;
+            if (isDual(name)) continue;   // Oracle·MySQL 가상 테이블 (SYS.DUAL 포함)
             String schema = t.getSchemaName() == null ? null : Names.unquote(t.getSchemaName());
             Access acc = writeTables.contains(t) ? Access.WRITE : Access.READ;
             tables.add(new TableRef(schema, name, acc));
@@ -267,6 +268,11 @@ public final class SqlAnalyzer {
         }
         return new AnalyzedSql(kind, true, null, List.copyOf(tables), List.copyOf(columns), c.selectsAll,
                 joins(c, aliasToTable, single));
+    }
+
+    /** 가상 테이블 DUAL (대소문자 무시) */
+    private static boolean isDual(String tableName) {
+        return "DUAL".equalsIgnoreCase(tableName);
     }
 
     /**
