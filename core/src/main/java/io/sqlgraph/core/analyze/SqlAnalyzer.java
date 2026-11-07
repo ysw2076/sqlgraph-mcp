@@ -219,6 +219,7 @@ public final class SqlAnalyzer {
             if (name == null || name.contains(DYN)) continue;
             if (isDual(name)) continue;   // Oracle·MySQL 가상 테이블 (SYS.DUAL 포함)
             String schema = t.getSchemaName() == null ? null : Names.unquote(t.getSchemaName());
+            if (isSysDummy1(schema, name)) continue;   // DB2 가상 테이블
             Access acc = writeTables.contains(t) ? Access.WRITE : Access.READ;
             tables.add(new TableRef(schema, name, acc));
             String key = Names.key(name);
@@ -268,6 +269,12 @@ public final class SqlAnalyzer {
         }
         return new AnalyzedSql(kind, true, null, List.copyOf(tables), List.copyOf(columns), c.selectsAll,
                 joins(c, aliasToTable, single));
+    }
+
+    /** DB2 가상 테이블 SYSIBM.SYSDUMMY1 (스키마 없음 또는 SYSIBM 일 때만, 대소문자 무시) */
+    private static boolean isSysDummy1(String schema, String tableName) {
+        return "SYSDUMMY1".equalsIgnoreCase(tableName)
+                && (schema == null || "SYSIBM".equalsIgnoreCase(schema));
     }
 
     /** 가상 테이블 DUAL (대소문자 무시) */
@@ -466,6 +473,7 @@ public final class SqlAnalyzer {
             String name = Names.unquote(Names.lastPart(full));
             if (name == null || FALLBACK_STOP.contains(Names.key(name)) || name.contains(DYN)) continue;
             String schema = full.contains(".") ? Names.unquote(full.substring(0, full.lastIndexOf('.'))) : null;
+            if (isSysDummy1(schema, name)) continue;
             Access acc = Access.READ;
             if (firstWrite && !writeAssigned
                     && (kw.equals("INTO") || kw.equals("UPDATE") || (kind == SqlKind.DELETE && kw.equals("FROM")))) {
