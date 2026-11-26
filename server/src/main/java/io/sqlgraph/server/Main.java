@@ -14,12 +14,13 @@ import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.function.Consumer;
 
 @Command(name = "sqlgraph", mixinStandardHelpOptions = true, version = Main.VERSION,
         description = "DB 스키마와 소스 속 SQL 을 인덱싱하는 MCP 서버",
-        subcommands = {Main.Serve.class, Main.Index.class, Main.Call.class, Main.Init.class,
+        subcommands = {Main.Serve.class, Main.Index.class, Main.Call.class, Main.Init.class, Main.Eval.class,
                 Installer.Install.class, Installer.Uninstall.class})
 public final class Main implements Runnable {
 
@@ -51,6 +52,35 @@ public final class Main implements Runnable {
             ws.pin(c);
         }
         return ws;
+    }
+
+    @Command(name = "eval", description = "의미 검색 평가: 평가셋의 질의를 keyword/semantic/auto 로 비교. "
+            + "예: sqlgraph eval samples/hr-project/semantic-eval.yml")
+    static class Eval implements Callable<Integer> {
+        @Parameters(index = "0", description = "평가셋 yml (queries: [{q, expect, kind}])")
+        Path file;
+
+        @Option(names = "--project", description = "프로젝트 폴더 (기본: 평가 파일이 있는 폴더)")
+        Path project;
+
+        @Option(names = "-k", description = "Recall@k 의 k (기본 5)")
+        int k = 5;
+
+        @Override
+        public Integer call() throws Exception {
+            List<SemanticEval.Query> queries = SemanticEval.load(file);
+            Path p = (project != null ? project : file.toAbsolutePath().getParent()).toAbsolutePath().normalize();
+            try (Workspace ws = workspace(null, logger(false))) {
+                SqlGraphService svc = ws.service(p);
+                if (!svc.semanticReady()) {
+                    System.out.println("의미 검색을 쓸 수 없습니다: " + Tools.semanticLine(svc.semanticStatus())
+                            + "\nSQLGRAPH_SEMANTIC=on 으로 'sqlgraph index " + p + "' 를 먼저 실행하세요.");
+                    return 1;
+                }
+                System.out.println(SemanticEval.report(SemanticEval.run(svc, queries), Math.max(1, k)));
+            }
+            return 0;
+        }
     }
 
     @Command(name = "serve", description = "MCP 서버 실행 (stdio). Claude Code 등이 이 명령으로 띄웁니다")

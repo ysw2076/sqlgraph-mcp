@@ -69,8 +69,15 @@ public final class EmbeddingIndexer {
         }
 
         Map<String, float[]> vectors = new LinkedHashMap<>();
-        List<String> hashes = new ArrayList<>(pending.keySet());
-        List<String> texts = new ArrayList<>(pending.values());
+        // 짧은 문장끼리 한 배치가 되도록 길이순 정렬 (섞이면 배치 전체가 가장 긴 문장 길이로 패딩된다)
+        List<Map.Entry<String, String>> byLength = new ArrayList<>(pending.entrySet());
+        byLength.sort(java.util.Comparator.comparingInt(e -> e.getValue().length()));
+        List<String> hashes = new ArrayList<>(byLength.size());
+        List<String> texts = new ArrayList<>(byLength.size());
+        for (Map.Entry<String, String> e : byLength) {
+            hashes.add(e.getKey());
+            texts.add(e.getValue());
+        }
         int total = texts.size();
         progress.accept(0, total);
         for (int from = 0; from < texts.size(); from += batchSize) {

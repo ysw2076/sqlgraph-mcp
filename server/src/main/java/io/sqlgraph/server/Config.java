@@ -54,11 +54,22 @@ public record Config(Path file, Path baseDir, Path project, Path index, List<Db>
      * @param runtimeJar onnxruntime jar (null 이면 자동)
      * @param threads    ONNX 스레드 수 (0 = 자동)
      */
-    public record Semantic(boolean enabled, Path modelPath, Path runtimeJar, int threads) {
+    /**
+     * @param relativeThreshold 의미 검색 결과 중 1위 점수 − 이 값 이상만 쓴다 (e5 점수는 0.8~0.9 에 몰려 고정 문턱이 의미 없음)
+     * @param topK              의미 검색에서 먼저 뽑는 문서 수 (테이블별로 묶기 전)
+     */
+    public record Semantic(boolean enabled, Path modelPath, Path runtimeJar, int threads,
+                           double relativeThreshold, int topK) {
+        public static final double DEFAULT_RELATIVE_THRESHOLD = 0.05;
+        public static final int DEFAULT_TOP_K = 50;
         public static final Semantic OFF = new Semantic(false, null, null, 0);
 
+        public Semantic(boolean enabled, Path modelPath, Path runtimeJar, int threads) {
+            this(enabled, modelPath, runtimeJar, threads, DEFAULT_RELATIVE_THRESHOLD, DEFAULT_TOP_K);
+        }
+
         public Semantic withEnabled(boolean e) {
-            return new Semantic(e, modelPath, runtimeJar, threads);
+            return new Semantic(e, modelPath, runtimeJar, threads, relativeThreshold, topK);
         }
     }
 
@@ -160,7 +171,29 @@ public record Config(Path file, Path baseDir, Path project, Path index, List<Db>
             }
         }
         if (threads < 0) throw new IllegalArgumentException("semantic.threads 는 0 이상이어야 합니다: " + threads);
-        return new Semantic(enabled, model, jar, threads);
+        double rel = Semantic.DEFAULT_RELATIVE_THRESHOLD;
+        Object r = s.get("relativeThreshold");
+        if (r != null) {
+            try {
+                rel = r instanceof Number n ? n.doubleValue() : Double.parseDouble(String.valueOf(r).strip());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("semantic.relativeThreshold 는 숫자여야 합니다: " + r);
+            }
+            if (rel < 0 || rel > 2) {
+                throw new IllegalArgumentException("semantic.relativeThreshold 는 0~2 사이여야 합니다: " + rel);
+            }
+        }
+        int topK = Semantic.DEFAULT_TOP_K;
+        Object k = s.get("topK");
+        if (k != null) {
+            try {
+                topK = k instanceof Number n ? n.intValue() : Integer.parseInt(String.valueOf(k).strip());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("semantic.topK 는 정수여야 합니다: " + k);
+            }
+            if (topK < 1) throw new IllegalArgumentException("semantic.topK 는 1 이상이어야 합니다: " + topK);
+        }
+        return new Semantic(enabled, model, jar, threads, rel, topK);
     }
 
     /**

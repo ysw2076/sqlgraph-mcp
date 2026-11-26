@@ -20,6 +20,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -378,6 +379,38 @@ public final class GraphStore implements AutoCloseable {
             ps.setString(4, db);
             ps.setString(5, db);
             return tableHits(ps);
+        }
+    }
+
+    /** id 목록의 테이블 (searchTables 와 같은 칸, 주어진 순서대로, 없는 id 는 건너뜀) */
+    public List<TableHit> tablesByIds(List<Long> ids) throws SQLException {
+        if (ids.isEmpty()) return List.of();
+        String marks = String.join(",", java.util.Collections.nCopies(ids.size(), "?"));
+        String sql = """
+                SELECT t.id, t.db_id, t.schema_name, t.name, t.kind, t.comment,
+                       (SELECT COUNT(*) FROM col c WHERE c.tbl_id = t.id),
+                       (SELECT COUNT(DISTINCT st.stmt_id) FROM stmt_tbl st WHERE st.tbl_key = t.name_key)
+                FROM tbl t WHERE t.id IN (%s)""".formatted(marks);
+        Map<Long, TableHit> byId = new HashMap<>();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            for (int i = 0; i < ids.size(); i++) ps.setLong(i + 1, ids.get(i));
+            for (TableHit h : tableHits(ps)) byId.put(h.id(), h);
+        }
+        List<TableHit> r = new ArrayList<>();
+        for (Long id : ids) {
+            TableHit h = byId.get(id);
+            if (h != null) r.add(h);
+        }
+        return r;
+    }
+
+    /** 컬럼 id → 컬럼 이름 (없으면 null) */
+    public String columnName(long colId) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT name FROM col WHERE id = ?")) {
+            ps.setLong(1, colId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString(1) : null;
+            }
         }
     }
 

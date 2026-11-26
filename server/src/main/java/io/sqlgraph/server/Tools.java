@@ -46,12 +46,14 @@ public final class Tools {
                 props(p -> { }), null));
         tools.add(tool("search_table",
                 "DB 테이블을 이름 또는 한글 코멘트로 검색합니다 (예: '발령', 'EMP', '사원 부서'). "
-                        + "어떤 테이블이 있는지 모를 때 grep 대신 먼저 사용하세요. 공백으로 나눈 키워드는 모두 포함되어야 합니다.",
+                        + "어떤 테이블이 있는지 모를 때 grep 대신 먼저 사용하세요. 공백으로 나눈 키워드는 모두 포함되어야 합니다. "
+                        + "의미 검색(임베딩)이 준비된 프로젝트는 표현이 달라도 뜻으로 찾고(예: '인사이동' → 발령), 결과의 '근거' 칸에 이유를 보여 줍니다.",
                 props(p -> {
                     p.set("keyword", prop("string", "테이블명 또는 코멘트 키워드"));
                     p.set("project", PROJECT_PROP);
                     p.set("include_columns", prop("boolean", "컬럼명/컬럼 코멘트까지 검색 (기본 false)"));
                     p.set("limit", prop("integer", "최대 결과 수 (기본 20)"));
+                    p.set("mode", prop("string", "auto(기본: 의미 검색이 준비됐으면 키워드+의미, 아니면 키워드) | keyword | semantic"));
                 }), "keyword"));
         tools.add(tool("describe_table",
                 "테이블의 컬럼(타입, PK, NULL 여부, 코멘트), 관계(FK + 쿼리 조인 조건에서 찾은 관계), 그리고 이 테이블을 사용하는 쿼리 목록"
@@ -140,7 +142,7 @@ public final class Tools {
             case "index_project" -> indexProject(opt(a, "path"), opt(a, "profile"), a.path("skip_db").asBoolean(false));
             case "list_projects" -> listProjects();
             case "search_table" -> searchTable(svc(a), req(a, "keyword"), a.path("include_columns").asBoolean(false),
-                    a.path("limit").asInt(20));
+                    a.path("limit").asInt(20), a.path("mode").asText("auto"));
             case "describe_table" -> describeTable(svc(a), req(a, "table"), opt(a, "db"), a.path("query_limit").asInt(30));
             case "impact_analysis" -> impact(svc(a), req(a, "table"), opt(a, "column"), a.path("limit").asInt(50));
             case "find_query" -> findQuery(svc(a), req(a, "keyword"), a.path("limit").asInt(10),
@@ -171,6 +173,58 @@ public final class Tools {
     // ================================================================= handlers
 
     String searchTable(SqlGraphService svc, String keyword, boolean includeColumns, int limit) throws Exception {
+        return searchTable(svc, keyword, includeColumns, limit, "keyword");
+    }
+
+    /** mode: auto | keyword | semantic. 의미 검색이 준비 안 됐으면 auto 는 keyword 와 출력이 같다 */
+    String searchTable(SqlGraphService svc, String keyword, boolean includeColumns, int limit, String mode)
+            throws Exception {
+        String m = mode == null || mode.isBlank() ? "auto" : mode.strip().toLowerCase();
+        if (!m.equals("auto") && !m.equals("keyword") && !m.equals("semantic")) {
+            return "mode 는 auto, keyword, semantic 중 하나여야 합니다: " + mode;
+        }
+        if (!m.equals("keyword")) {
+            if (svc.semanticReady()) return hybridTable(svc, keyword, includeColumns, limit, m.equals("semantic"));
+            if (m.equals("semantic")) {
+                return "의미 검색을 쓸 수 없습니다: " + semanticLine(svc.semanticStatus());
+            }
+        }
+        return keywordTable(svc, keyword, includeColumns, limit);
+    }
+
+    private String hybridTable(SqlGraphService svc, String keyword, boolean includeColumns, int limit,
+                               boolean semanticOnly) throws Exception {
+        List<SqlGraphService.HybridHit> hits = svc.hybridSearch(keyword, includeColumns, clamp(limit, 1, 200),
+                semanticOnly);
+        if (hits.isEmpty()) return "'" + keyword + "' 에 해당하는 테이블이 없습니다.";
+        StringBuilder sb = new StringBuilder();
+        sb.append("테이블 ").append(hits.size()).append("건\n\n");
+        sb.append("| 테이블 | DB | 코멘트 | 컬럼 | 사용 쿼리 | 근거 |\n|---|---|---|---|---|---|\n");
+        for (SqlGraphService.HybridHit x : hits) {
+            TableHit h = x.table();
+            sb.append("| ").append(qualified(h)).append(h.kind().equals("VIEW") ? " (VIEW)" : "")
+                    .append(" | ").append(h.db())
+                    .append(" | ").append(nz(h.comment()))
+                    .append(" | ").append(h.columnCount())
+                    .append(" | ").append(h.stmtCount())
+                    .append(" | ").append(reason(x)).append(" |\n");
+        }
+        return sb.toString();
+    }
+
+    /** 이름 / 키워드 / 의미 0.873 / 키워드+의미 0.873, 컬럼 문서에서 왔으면 뒤에 (컬럼 X) */
+    static String reason(SqlGraphService.HybridHit x) {
+        var r = x.rank();
+        if (r.exact()) return "이름";
+        boolean kw = r.keywordRank() != null, sem = r.semanticScore() != null;
+        String s = kw && sem ? "키워드+의미 " : kw ? "키워드" : "의미 ";
+        if (sem) s += String.format(java.util.Locale.ROOT, "%.3f", r.semanticScore());
+        if (sem && x.columnName() != null) s += " (컬럼 " + x.columnName() + ")";
+        return s;
+    }
+
+    private String keywordTable(SqlGraphService svc, String keyword, boolean includeColumns, int limit)
+            throws Exception {
         List<TableHit> hits = svc.store().searchTables(keyword, includeColumns, clamp(limit, 1, 200));
         if (hits.isEmpty()) {
             return "'" + keyword + "' 에 해당하는 테이블이 없습니다."

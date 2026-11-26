@@ -123,10 +123,12 @@ class EmbeddingIndexerTest {
             assertEquals(3, r.embedded(), "HR_DEPT 테이블 문서 + 컬럼 문서 2");
             assertEquals(5, r.reused());
             assertEquals(3, r.removed(), "옛 문장 캐시 제거");
-            assertEquals(List.of(
+            // 순서는 길이순 배치라 문서 순서와 다르다 (EmbeddingBatchOrderTest) — 어떤 문장인지만 본다
+            assertEquals(java.util.Set.of(
                     "부서정보. 테이블 HR_DEPT. 컬럼: 부서코드, 부서명",
                     "부서정보 > 부서코드 (DEPT CD)",
-                    "부서정보 > 부서명 (DEPT NM)"), e.seen);
+                    "부서정보 > 부서명 (DEPT NM)"), java.util.Set.copyOf(e.seen));
+            assertEquals(3, e.seen.size());
             assertEquals(8, store.embCacheCount());
             assertEquals(8, store.embCount());
         }

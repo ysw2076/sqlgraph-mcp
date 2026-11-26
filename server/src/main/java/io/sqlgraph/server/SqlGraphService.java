@@ -7,6 +7,8 @@ import io.sqlgraph.connector.detect.DbConfigDetector;
 import io.sqlgraph.connector.detect.DetectedDb;
 import io.sqlgraph.core.index.Indexer;
 import io.sqlgraph.core.semantic.EmbeddingIndexer;
+import io.sqlgraph.core.semantic.HybridRanker;
+import io.sqlgraph.core.semantic.VectorIndex;
 import io.sqlgraph.core.spi.Embedder;
 import io.sqlgraph.core.spi.SchemaSource;
 import io.sqlgraph.core.spi.SqlExtractor;
@@ -354,9 +356,109 @@ public final class SqlGraphService implements AutoCloseable {
         return i < 0 ? glob.length() : i;
     }
 
+    // ============================================================== 의미 검색 (질의)
+
+    /** 하이브리드 검색 결과 한 건. columnName 은 의미 점수가 컬럼 문서에서 왔을 때만 */
+    public record HybridHit(GraphStore.TableHit table, HybridRanker.Ranked rank, String columnName) {}
+
+    /** 질의용 Embedder (처음 의미 검색 때 한 번 열고 close 때 닫음) */
+    private Embedder queryEmbedder;
+    /** 질의용 Embedder 를 열다 실패한 이유 (다시 시도하지 않음) */
+    private String queryEmbedderError;
+    private VectorIndex vectors;
+    private String vectorsStamp;
+
+    private synchronized Embedder queryEmbedder() {
+        if (queryEmbedder == null && queryEmbedderError == null) {
+            try {
+                queryEmbedder = embedders.open(config.semantic(), log);
+            } catch (Exception e) {
+                queryEmbedderError = describe(e);
+                log.accept("의미 검색 질의용 모델을 열지 못했습니다: " + queryEmbedderError);
+            }
+        }
+        return queryEmbedder;
+    }
+
+    /**
+     * 의미 검색을 지금 쓸 수 있는가: 켜져 있고, 임베딩 작업이 돌고 있지 않고, 저장된 임베딩이 있고,
+     * 그 모델이 질의용 모델과 같을 때. 처음 true 를 판단할 때 질의용 모델을 연다 (수 초).
+     */
+    public boolean semanticReady() throws Exception {
+        if (!semanticEnabled()) return false;
+        SemanticJob j = job;
+        if (j != null && j.thread != null && j.thread.isAlive()) return false;
+        GraphStore st = store();
+        String model = st.meta().get("emb_model");
+        if (model == null || st.embCount() == 0) return false;
+        Embedder q = queryEmbedder();
+        return q != null && model.equals(q.modelId());
+    }
+
+    /** 저장된 임베딩이 바뀌었으면 (emb_updated_at) 다시 읽는다 */
+    private synchronized VectorIndex vectors() throws Exception {
+        String stamp = store().meta().get("emb_updated_at");
+        if (vectors == null || !java.util.Objects.equals(stamp, vectorsStamp)) {
+            vectors = VectorIndex.load(store());
+            vectorsStamp = stamp;
+        }
+        return vectors;
+    }
+
+    /**
+     * 키워드 순위와 의미 순위를 합친 검색. 호출 전에 {@link #semanticReady()} 를 확인한다.
+     *
+     * @param semanticOnly true 면 키워드 순위 없이 의미만 (이름 일치는 그대로 맨 위)
+     */
+    public List<HybridHit> hybridSearch(String keyword, boolean includeColumns, int limit, boolean semanticOnly)
+            throws Exception {
+        Config.Semantic sem = config.semantic();
+        GraphStore st = store();
+        String q = keyword == null ? "" : keyword.strip();
+
+        List<Long> kwIds = new ArrayList<>();
+        if (!semanticOnly) {
+            for (GraphStore.TableHit h : st.searchTables(q, includeColumns, sem.topK())) kwIds.add(h.id());
+        }
+        Set<Long> exact = new HashSet<>();
+        if (!q.isEmpty() && !q.contains(" ")) {
+            for (GraphStore.TableHit h : st.findTables(q, null)) exact.add(h.id());
+        }
+
+        List<VectorIndex.Hit> hits = List.of();
+        float threshold = Float.POSITIVE_INFINITY;
+        if (!q.isEmpty()) {
+            float[] qv = queryEmbedder().embed(List.of(q), Embedder.Kind.QUERY)[0];
+            hits = vectors().topK(qv, sem.topK());
+            if (!hits.isEmpty()) threshold = (float) (hits.get(0).score() - sem.relativeThreshold());
+        }
+
+        List<HybridRanker.Ranked> ranked = HybridRanker.rank(kwIds, hits, exact, threshold, limit);
+        List<GraphStore.TableHit> tables = st.tablesByIds(ranked.stream().map(HybridRanker.Ranked::tblId).toList());
+        Map<Long, GraphStore.TableHit> byId = new java.util.HashMap<>();
+        for (GraphStore.TableHit t : tables) byId.put(t.id(), t);
+        List<HybridHit> out = new ArrayList<>();
+        for (HybridRanker.Ranked r : ranked) {
+            GraphStore.TableHit t = byId.get(r.tblId());
+            if (t == null) continue;
+            String col = r.bestColId() == null ? null : st.columnName(r.bestColId());
+            out.add(new HybridHit(t, r, col));
+        }
+        return out;
+    }
+
     @Override
     public synchronized void close() throws Exception {
         stopSemantic();
+        if (queryEmbedder instanceof AutoCloseable c) {
+            try {
+                c.close();
+            } catch (Exception e) {
+                log.accept("질의용 Embedder 닫기 실패: " + e.getMessage());
+            }
+        }
+        queryEmbedder = null;
+        vectors = null;
         if (store != null) store.close();
     }
 }
