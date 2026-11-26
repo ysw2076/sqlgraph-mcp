@@ -145,14 +145,42 @@ sources:
   exclude: ["**/test/**"]
 ```
 
+## Semantic search (experimental, off by default)
+
+By default `search_table` matches the **text** of table names and comments. With semantic search on, it also matches by
+**meaning**, so different wording still finds the table (e.g. a query for "personnel transfer" finds a table commented
+"appointment history").
+
+```yaml
+# sqlgraph.yml
+semantic:
+  enabled: true
+  # modelPath: D:/models/e5-small        # offline: folder with model_quantized.onnx + tokenizer.json
+  # runtimeJar: D:/models/onnxruntime-1.32.0.jar
+  # threads: 0                           # 0 = number of CPU cores
+  # relativeThreshold: 0.05              # keep semantic hits scoring at least (top score − this)
+```
+
+To turn it on without editing the file, set `SQLGRAPH_SEMANTIC=on` (`off` to force it off).
+
+- **Everything runs on your machine.** Schema and comments are never sent to an external API.
+- The first time, the model (`multilingual-e5-small` int8, MIT) and ONNX Runtime are downloaded once into `~/.sqlgraph`
+  (about 190MB, sha256-verified). The default distribution size does not change.
+- After indexing, embeddings are built **in the background**; watch the `의미 검색:` line in `index_status`.
+  Re-indexing only re-embeds tables and columns whose text changed.
+- When ready, `search_table` results get a `근거` (reason) column: name / keyword / meaning score (and the column it came from).
+  Use the `mode` argument for `keyword` or `semantic` only. When off or not ready, the output is exactly as before.
+- Measure quality with `sqlgraph eval samples/hr-project/semantic-eval.yml` (per-query ranks, Recall@k and MRR per mode).
+
 ## Where data is stored
 
 ```
 ~/.sqlgraph/                       (override with the SQLGRAPH_HOME environment variable)
   app/                             installed program (when using the install script)
   projects.json                    list of indexed projects
-  indexes/<project>-<hash>/graph.db  per-project index (SQLite)
+  indexes/<project>-<hash>/graph.db  per-project index (SQLite, includes semantic vectors)
   drivers/                         automatically downloaded JDBC drivers
+  models/, lib/                    semantic search model and ONNX Runtime (only when enabled)
 ```
 
 Because the index lives outside your project folder, there's no risk of committing your DB structure to the company repository.
@@ -167,6 +195,7 @@ sqlgraph install                               # register with Claude Code (--dr
 sqlgraph uninstall                             # unregister
 sqlgraph serve                                 # MCP server (launched by Claude Code)
 sqlgraph init                                  # generate an example sqlgraph.yml
+sqlgraph eval samples/hr-project/semantic-eval.yml  # evaluate semantic search (-k 1, --project DIR)
 ```
 
 If the `claude` CLI isn't available, `sqlgraph install` prints the manual registration command and an example Claude Desktop config.

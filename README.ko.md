@@ -143,14 +143,41 @@ sources:
   exclude: ["**/test/**"]
 ```
 
+## 의미 검색 (실험 기능, 기본 꺼짐)
+
+`search_table` 은 기본적으로 이름·코멘트의 **글자**로 찾습니다. 의미 검색을 켜면 표현이 달라도 **뜻**으로 찾습니다
+(예: `인사이동` → 코멘트가 "발령이력"인 테이블, `실수령액` → "실지급액" 컬럼이 있는 테이블).
+
+```yaml
+# sqlgraph.yml
+semantic:
+  enabled: true
+  # modelPath: D:/models/e5-small        # 폐쇄망: model_quantized.onnx + tokenizer.json 이 든 폴더
+  # runtimeJar: D:/models/onnxruntime-1.32.0.jar
+  # threads: 0                           # 0 = CPU 코어 수
+  # relativeThreshold: 0.05              # 1위 점수 − 이 값 이상인 의미 결과만
+```
+
+설정 파일을 고치지 않고 켜려면 환경변수 `SQLGRAPH_SEMANTIC=on` (끄기는 `off`).
+
+- **모든 계산은 이 PC 안에서** 합니다. 스키마·코멘트를 외부 API 로 보내지 않습니다.
+- 처음 켜면 모델(`multilingual-e5-small` int8, MIT)과 ONNX Runtime 을 `~/.sqlgraph` 에 한 번 내려받습니다 (약 190MB, sha256 검증).
+  기본 배포 파일 크기는 그대로입니다.
+- 인덱싱이 끝나면 **백그라운드**에서 임베딩을 만듭니다. 진행은 `index_status` 의 `의미 검색:` 줄에서 봅니다.
+  다시 인덱싱하면 바뀐 테이블·컬럼만 다시 계산합니다.
+- 준비되면 `search_table` 결과에 `근거` 칸(`이름` / `키워드` / `의미 0.87 (컬럼 X)`)이 붙습니다.
+  `mode` 인자로 `keyword` / `semantic` 만 쓸 수도 있습니다. 꺼져 있거나 준비 전이면 출력은 예전과 같습니다.
+- 품질 확인: `sqlgraph eval samples/hr-project/semantic-eval.yml` — 질의별 순위와 모드별 Recall@k·MRR.
+
 ## 데이터 위치
 
 ```
 ~/.sqlgraph/                       (환경변수 SQLGRAPH_HOME 으로 변경)
   app/                             설치된 프로그램 (설치 스크립트 사용 시)
   projects.json                    인덱싱한 프로젝트 목록
-  indexes/<프로젝트>-<해시>/graph.db  프로젝트별 인덱스 (SQLite)
+  indexes/<프로젝트>-<해시>/graph.db  프로젝트별 인덱스 (SQLite, 의미 검색 벡터 포함)
   drivers/                         자동으로 받은 JDBC 드라이버
+  models/, lib/                    의미 검색 모델·ONNX Runtime (켰을 때만)
 ```
 
 인덱스를 프로젝트 폴더 밖에 두기 때문에 회사 저장소에 DB 구조가 커밋될 걱정이 없습니다.
@@ -165,6 +192,7 @@ sqlgraph install                               # Claude Code 등록 (--dry-run �
 sqlgraph uninstall                             # 등록 해제
 sqlgraph serve                                 # MCP 서버 (Claude Code 가 실행)
 sqlgraph init                                  # sqlgraph.yml 예시 생성
+sqlgraph eval samples/hr-project/semantic-eval.yml  # 의미 검색 평가 (-k 1, --project DIR)
 ```
 
 `claude` CLI 가 없으면 `sqlgraph install` 이 수동 등록 명령과 Claude Desktop 설정 예시를 출력합니다.
