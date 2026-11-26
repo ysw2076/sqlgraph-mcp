@@ -1,0 +1,43 @@
+# 의미 검색 평가셋 (sqlgraph eval samples/hr-project/semantic-eval.yml)
+#
+# q      : 사용자가 실제로 칠 법한 질의
+# expect : 정답 테이블 (여러 개면 하나라도 맞으면 정답)
+# kind   : synonym  - 코멘트와 다른 표현 (키워드 검색으로는 못 찾는 것이 정상)
+#          column   - 테이블 코멘트가 아니라 컬럼 의미로 찾아야 하는 것
+#          english  - 영어 질의
+#          keyword  - 이름·코멘트 그대로 (회귀 확인: 의미 검색이 기존 결과를 망치지 않아야 한다)
+#
+# 스키마: HR_DEPT 부서 / HR_EMP 사원 기본 / HR_APPNT 인사발령 / CM_CODE 공통코드
+#         PAY_MONTH 월급여 / PAY_ITEM 급여항목별 금액 / PAY_HIST 급여변경이력
+queries:
+  - { q: "인사이동",        expect: [HR_APPNT],  kind: synonym }
+  - { q: "전보 이력",       expect: [HR_APPNT],  kind: synonym }
+  - { q: "승진 내역",       expect: [HR_APPNT],  kind: synonym }
+  - { q: "조직 정보",       expect: [HR_DEPT],   kind: synonym }
+  - { q: "팀 목록",         expect: [HR_DEPT],   kind: synonym }
+  - { q: "직원 정보",       expect: [HR_EMP],    kind: synonym }
+  - { q: "임직원 명단",     expect: [HR_EMP],    kind: synonym }
+  - { q: "월급",            expect: [PAY_MONTH], kind: synonym }
+  - { q: "봉급 명세",       expect: [PAY_MONTH], kind: synonym }
+  - { q: "수당별 금액",     expect: [PAY_ITEM],  kind: synonym }
+  - { q: "연봉 변동 기록",  expect: [PAY_HIST],  kind: synonym }
+  - { q: "코드 마스터",     expect: [CM_CODE],   kind: synonym }
+
+  - { q: "입사 날짜",       expect: [HR_EMP],    kind: column }
+  - { q: "퇴사자",          expect: [HR_EMP],    kind: column }
+  - { q: "상위 조직",       expect: [HR_DEPT],   kind: column }
+  - { q: "실수령액",        expect: [PAY_MONTH], kind: column }
+  - { q: "세금 공제 합계",  expect: [PAY_MONTH], kind: column }
+  - { q: "급여 마감 여부",  expect: [PAY_MONTH], kind: column }
+  - { q: "발령 전 부서",    expect: [HR_APPNT],  kind: column }
+
+  - { q: "employee",        expect: [HR_EMP],    kind: english }
+  - { q: "department",      expect: [HR_DEPT],   kind: english }
+  - { q: "payroll",         expect: [PAY_MONTH], kind: english }
+  - { q: "salary history",  expect: [PAY_HIST],  kind: english }
+
+  - { q: "HR_EMP",          expect: [HR_EMP],    kind: keyword }
+  - { q: "인사발령",        expect: [HR_APPNT],  kind: keyword }
+  - { q: "급여변경이력",    expect: [PAY_HIST],  kind: keyword }
+  - { q: "부서",            expect: [HR_DEPT],   kind: keyword }
+  - { q: "공통코드",        expect: [CM_CODE],   kind: keyword }
