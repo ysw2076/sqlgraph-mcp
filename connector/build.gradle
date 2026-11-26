@@ -1,4 +1,9 @@
 dependencies {
     api project(':core')
     implementation "org.yaml:snakeyaml:${v.snakeyaml}"   // Spring application.yml 파싱
+
+    // 임베딩 tokenizer.json 읽기
+    implementation "com.fasterxml.jackson.core:jackson-databind:${v.jackson}"
+    implementation "com.fasterxml.jackson.core:jackson-core:${v.jacksonCore ?: v.jackson}"
+    implementation "com.fasterxml.jackson.core:jackson-annotations:${v.jackson}"
 }

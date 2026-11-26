@@ -1,0 +1,25 @@
+{
+  "version": "1.0",
+  "normalizer": null,
+  "pre_tokenizer": { "type": "Metaspace", "replacement": "▁", "add_prefix_space": true },
+  "model": {
+    "type": "Unigram",
+    "unk_id": 3,
+    "vocab": [
+      ["<s>", 0.0],
+      ["<pad>", 0.0],
+      ["</s>", 0.0],
+      ["<unk>", 0.0],
+      ["▁", -2.0],
+      ["▁ab", -10.0],
+      ["▁a", -1.0],
+      ["bc", -1.0],
+      ["a", -5.0],
+      ["b", -5.0],
+      ["c", -5.0],
+      ["▁ABC", -1.0],
+      ["x", -3.0],
+      ["▁x", -1.0]
+    ]
+  }
+}
