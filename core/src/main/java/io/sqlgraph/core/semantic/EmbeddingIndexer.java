@@ -1,0 +1,105 @@
+package io.sqlgraph.core.semantic;
+
+import io.sqlgraph.core.spi.Embedder;
+import io.sqlgraph.core.store.GraphStore;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * 임베딩 문서를 만들어 캐시에 없는 것만 임베딩하고 graph.db 의 emb/emb_cache 에 쓴다.
+ * 저장은 한 트랜잭션: Embedder 가 실패하면 아무것도 바뀌지 않는다.
+ */
+public final class EmbeddingIndexer {
+
+    /** 문서 형식 버전. 바꾸면 캐시가 전부 무효가 된다. */
+    public static final String DOC_VERSION = "1";
+
+    /**
+     * @param docs     만든 문서 수
+     * @param embedded 새로 임베딩한 문서 수
+     * @param reused   캐시를 다시 쓴 문서 수
+     * @param removed  지운 캐시 행 수
+     */
+    public record Result(int docs, int embedded, int reused, int removed) {}
+
+    public Result run(GraphStore store, Embedder embedder, int batchSize) throws Exception {
+        if (batchSize <= 0) throw new IllegalArgumentException("batchSize 는 1 이상이어야 합니다: " + batchSize);
+        String modelId = embedder.modelId();
+        int dim = embedder.dim();
+        if (dim <= 0) throw new IllegalStateException("Embedder 차원이 올바르지 않습니다: " + dim);
+
+        List<DocBuilder.Doc> docs = DocBuilder.build(store);
+        Set<String> cached = store.embCacheHashes();
+
+        List<GraphStore.EmbRow> rows = new ArrayList<>(docs.size());
+        Map<String, String> pending = new LinkedHashMap<>();   // hash → 문장 (캐시에 없는 것, 중복 제거)
+        int embedded = 0, reused = 0;
+        for (DocBuilder.Doc d : docs) {
+            String h = hash(modelId, d.text());
+            rows.add(new GraphStore.EmbRow(d.kind(), d.tblId(), d.colId(), h));
+            if (cached.contains(h)) {
+                reused++;
+            } else {
+                embedded++;
+                pending.putIfAbsent(h, d.text());
+            }
+        }
+
+        Map<String, float[]> vectors = new LinkedHashMap<>();
+        List<String> hashes = new ArrayList<>(pending.keySet());
+        List<String> texts = new ArrayList<>(pending.values());
+        for (int from = 0; from < texts.size(); from += batchSize) {
+            int to = Math.min(texts.size(), from + batchSize);
+            List<String> batch = texts.subList(from, to);
+            float[][] out = embedder.embed(List.copyOf(batch), Embedder.Kind.DOCUMENT);
+            if (out == null || out.length != batch.size()) {
+                throw new IllegalStateException("Embedder 결과 개수가 다릅니다: 기대 " + batch.size()
+                        + ", 실제 " + (out == null ? "null" : out.length));
+            }
+            for (int i = 0; i < out.length; i++) {
+                if (out[i] == null || out[i].length != dim) {
+                    throw new IllegalStateException("Embedder 결과 차원이 다릅니다: 기대 " + dim
+                            + ", 실제 " + (out[i] == null ? "null" : out[i].length));
+                }
+                vectors.put(hashes.get(from + i), normalize(out[i]));
+            }
+        }
+
+        Map<String, String> meta = new LinkedHashMap<>();
+        meta.put("emb_model", modelId);
+        meta.put("emb_dim", String.valueOf(dim));
+        meta.put("emb_doc_version", DOC_VERSION);
+        int removed = store.writeEmbeddings(vectors, rows, meta);
+        return new Result(docs.size(), embedded, reused, removed);
+    }
+
+    /** sha256 hex of modelId + "\n" + DOC_VERSION + "\n" + 문장 */
+    public static String hash(String modelId, String text) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] d = md.digest((modelId + "\n" + DOC_VERSION + "\n" + text).getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(d);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** L2 정규화한 복사본 (크기 0 이면 그대로) */
+    static float[] normalize(float[] v) {
+        double s = 0;
+        for (float f : v) s += (double) f * f;
+        float[] r = v.clone();
+        if (s == 0) return r;
+        double n = Math.sqrt(s);
+        for (int i = 0; i < r.length; i++) r[i] = (float) (r[i] / n);
+        return r;
+    }
+}

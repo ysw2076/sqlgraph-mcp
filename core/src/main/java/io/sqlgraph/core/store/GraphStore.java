@@ -50,7 +50,19 @@ public final class GraphStore implements AutoCloseable {
     /** 쿼리 조인에서 찾은 관계 (t1.c1 = t2.c2 [cond]) 와 근거 쿼리 수 */
     public record Relation(String t1, String c1, String t2, String c2, String cond, int count) {}
 
-    private static final int SCHEMA_VERSION = 2;
+    /** 임베딩 문서 만들기용 테이블 (comment 는 비었으면 null) */
+    public record DocTable(long id, String name, String comment) {}
+
+    /** 임베딩 문서 만들기용 컬럼 (comment 는 비었으면 null) */
+    public record DocColumn(long id, long tblId, String name, String comment) {}
+
+    /** emb 한 행. colId 는 컬럼일 때만 */
+    public record EmbRow(String kind, long tblId, Long colId, String hash) {}
+
+    /** emb 행과 캐시된 벡터 */
+    public record EmbVector(String kind, long tblId, Long colId, float[] vec) {}
+
+    private static final int SCHEMA_VERSION = 3;
     private final Connection conn;
 
     private GraphStore(Connection conn) {
@@ -119,6 +131,9 @@ public final class GraphStore implements AutoCloseable {
                   stmt_id INTEGER, t1 TEXT, c1 TEXT, t2 TEXT, c2 TEXT, cond TEXT)""");
             s.execute("CREATE INDEX IF NOT EXISTS ix_join_t1 ON stmt_join(t1)");
             s.execute("CREATE INDEX IF NOT EXISTS ix_join_t2 ON stmt_join(t2)");
+            s.execute("CREATE TABLE IF NOT EXISTS emb_cache(hash TEXT PRIMARY KEY, vec BLOB)");
+            s.execute("CREATE TABLE IF NOT EXISTS emb(kind TEXT, tbl_id INTEGER, col_id INTEGER, hash TEXT)");
+            s.execute("CREATE INDEX IF NOT EXISTS ix_emb_tbl ON emb(tbl_id)");
         }
         setMeta("schema_version", String.valueOf(SCHEMA_VERSION));
     }
@@ -131,7 +146,8 @@ public final class GraphStore implements AutoCloseable {
         boolean auto = conn.getAutoCommit();
         conn.setAutoCommit(false);
         try (Statement s = conn.createStatement()) {
-            for (String t : List.of("db", "tbl", "col", "fk", "stmt", "stmt_tbl", "stmt_col", "stmt_join")) {
+            for (String t : List.of("db", "tbl", "col", "fk", "stmt", "stmt_tbl", "stmt_col", "stmt_join",
+                    "emb")) {
                 s.execute("DELETE FROM " + t);
             }
             writeSchemas(snapshots);
@@ -703,6 +719,139 @@ public final class GraphStore implements AutoCloseable {
             }
         }
         return r;
+    }
+
+    // =============================================================== embedding
+
+    /** 메타데이터의 모든 테이블 (id 순) */
+    public List<DocTable> docTables() throws SQLException {
+        List<DocTable> r = new ArrayList<>();
+        try (Statement s = conn.createStatement();
+             ResultSet rs = s.executeQuery("SELECT id, name, comment FROM tbl ORDER BY id")) {
+            while (rs.next()) r.add(new DocTable(rs.getLong(1), rs.getString(2), blankToNull(rs.getString(3))));
+        }
+        return r;
+    }
+
+    /** 코멘트가 있는 컬럼 (테이블 id → ordinal 순) */
+    public List<DocColumn> commentedColumns() throws SQLException {
+        List<DocColumn> r = new ArrayList<>();
+        try (Statement s = conn.createStatement(); ResultSet rs = s.executeQuery("""
+                SELECT id, tbl_id, name, comment FROM col
+                WHERE comment IS NOT NULL AND TRIM(comment) <> ''
+                ORDER BY tbl_id, ordinal, id""")) {
+            while (rs.next()) {
+                r.add(new DocColumn(rs.getLong(1), rs.getLong(2), rs.getString(3), blankToNull(rs.getString(4))));
+            }
+        }
+        return r;
+    }
+
+    /** 이 테이블을 쓰는 쿼리의 owner (쓰는 쿼리 수 내림차순, 이름 오름차순) */
+    public List<String> tableOwners(long tableId, int limit) throws SQLException {
+        List<String> r = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement("""
+                SELECT s.owner, COUNT(DISTINCT s.id) n
+                FROM tbl t JOIN stmt_tbl st ON st.tbl_key = t.name_key JOIN stmt s ON s.id = st.stmt_id
+                WHERE t.id = ? AND s.owner IS NOT NULL AND s.owner <> ''
+                GROUP BY s.owner ORDER BY n DESC, s.owner LIMIT ?""")) {
+            ps.setLong(1, tableId);
+            ps.setInt(2, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) r.add(rs.getString(1));
+            }
+        }
+        return r;
+    }
+
+    /** emb_cache 에 있는 해시 */
+    public java.util.Set<String> embCacheHashes() throws SQLException {
+        java.util.Set<String> r = new java.util.HashSet<>();
+        try (Statement s = conn.createStatement(); ResultSet rs = s.executeQuery("SELECT hash FROM emb_cache")) {
+            while (rs.next()) r.add(rs.getString(1));
+        }
+        return r;
+    }
+
+    public int embCount() throws SQLException {
+        return count("SELECT COUNT(*) FROM emb");
+    }
+
+    public int embCacheCount() throws SQLException {
+        return count("SELECT COUNT(*) FROM emb_cache");
+    }
+
+    /**
+     * 임베딩을 한 트랜잭션으로 쓴다: 새 벡터를 캐시에 넣고, emb 를 rows 로 다시 쓰고,
+     * emb 가 참조하지 않는 캐시 행을 지우고, meta 를 기록한다.
+     *
+     * @return 지운 캐시 행 수
+     */
+    public synchronized int writeEmbeddings(Map<String, float[]> newVectors, List<EmbRow> rows,
+                                            Map<String, String> meta) throws SQLException {
+        boolean auto = conn.getAutoCommit();
+        conn.setAutoCommit(false);
+        try (PreparedStatement pc = conn.prepareStatement("INSERT OR REPLACE INTO emb_cache(hash, vec) VALUES(?,?)");
+             PreparedStatement pe = conn.prepareStatement(
+                     "INSERT INTO emb(kind, tbl_id, col_id, hash) VALUES(?,?,?,?)");
+             Statement s = conn.createStatement()) {
+            for (var e : newVectors.entrySet()) {
+                pc.setString(1, e.getKey());
+                pc.setBytes(2, encodeVector(e.getValue()));
+                pc.addBatch();
+            }
+            pc.executeBatch();
+            s.execute("DELETE FROM emb");
+            for (EmbRow r : rows) {
+                pe.setString(1, r.kind());
+                pe.setLong(2, r.tblId());
+                if (r.colId() == null) pe.setNull(3, java.sql.Types.INTEGER); else pe.setLong(3, r.colId());
+                pe.setString(4, r.hash());
+                pe.addBatch();
+            }
+            pe.executeBatch();
+            int removed = s.executeUpdate(
+                    "DELETE FROM emb_cache WHERE hash NOT IN (SELECT hash FROM emb WHERE hash IS NOT NULL)");
+            for (var e : meta.entrySet()) setMeta(e.getKey(), e.getValue());
+            conn.commit();
+            return removed;
+        } catch (SQLException | RuntimeException e) {
+            conn.rollback();
+            throw e;
+        } finally {
+            conn.setAutoCommit(auto);
+        }
+    }
+
+    /** emb 의 모든 행과 벡터 (캐시에 없는 행은 건너뜀) */
+    public List<EmbVector> embeddings() throws SQLException {
+        List<EmbVector> r = new ArrayList<>();
+        try (Statement s = conn.createStatement(); ResultSet rs = s.executeQuery("""
+                SELECT e.kind, e.tbl_id, e.col_id, c.vec FROM emb e JOIN emb_cache c ON c.hash = e.hash
+                ORDER BY e.rowid""")) {
+            while (rs.next()) {
+                long col = rs.getLong(3);
+                Long colId = rs.wasNull() ? null : col;
+                r.add(new EmbVector(rs.getString(1), rs.getLong(2), colId, decodeVector(rs.getBytes(4))));
+            }
+        }
+        return r;
+    }
+
+    /** float32 리틀엔디언 (길이 dim×4 바이트) */
+    public static byte[] encodeVector(float[] v) {
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(v.length * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        for (float f : v) b.putFloat(f);
+        return b.array();
+    }
+
+    public static float[] decodeVector(byte[] bytes) {
+        if (bytes == null) return new float[0];
+        if (bytes.length % 4 != 0) throw new IllegalStateException("벡터 길이가 4의 배수가 아닙니다: " + bytes.length);
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        float[] v = new float[bytes.length / 4];
+        for (int i = 0; i < v.length; i++) v[i] = b.getFloat();
+        return v;
     }
 
     private int count(String sql) throws SQLException {
