@@ -147,6 +147,30 @@ semantic:
 - R4. CPU 임베딩 속도. 목표: 2.1만 문서 첫 인덱싱 3분 이내, 재인덱싱(변경 1%) 10초 이내.
 - R5. 폐쇄망 빌드(`-Poffline`, `libs/`)에서 ONNX Runtime jar 를 어떻게 공급할지.
 
+### 4.1 S0 결과 (2026-11-26, Windows x64, 배포 jlink 런타임 Java 25.0.5)
+
+고정한 파일 (해시는 받은 파일로 직접 확인):
+
+| 파일 | 출처 | 크기 | sha256 |
+|---|---|---|---|
+| `model_quantized.onnx` (int8) | Hugging Face `Xenova/multilingual-e5-small` @ `761b726dd34fb83930e26aab4e9ac3899aa1fa78` `onnx/` | 118,308,185 | `f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193` |
+| `tokenizer.json` | 같은 저장소·리비전 | 17,082,730 | `0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39` |
+| `onnxruntime-1.32.0.jar` | Maven Central `com.microsoft.onnxruntime:onnxruntime` | 55,729,095 | `5f14563a52ac9dd5166c18b18ce837fd7589d4834e76e4e552c7b053d4b0538c` |
+
+모델 라이선스: MIT (intfloat/multilingual-e5-small).
+
+| 위험 | 결과 | 결정 |
+|---|---|---|
+| R1 늦은 로딩 | ✅ 앱 클래스패스 밖의 jar 를 `URLClassLoader` 로 불러 세션 열기·추론 성공 (세션 열기 2~5초) | ORT jar 는 기본 배포에 넣지 않고 처음 켤 때 받는다 |
+| R2 토크나이저 | ✅ 순수 Java Unigram (NFKC → 공백 정리 → Metaspace `▁` → Viterbi, unk 묶기). `Hello world` → `[0, 35378, 8999, 2]` 로 XLM-R 표준과 같음. `Precompiled` 정규화는 NFKC 로 근사 — 드문 문자에서 차이 가능 | 순수 Java 로 간다 (네이티브 추가 없음) |
+| R3 jlink 런타임 | ✅ 지금 `runtimeModules` 그대로 동작 | 모듈 추가 없음 |
+| R4 속도 | ⚠️ 테이블 문서(평균 106 토큰) 초당 18개, 컬럼 문서 초당 82개 → 테이블 약 1천 + 컬럼 약 1.7만 첫 임베딩 **약 4.5분** (목표 3분 초과). 질의 1건 15~50ms | 백그라운드 실행 + 문장 캐시로 재인덱싱은 빠르게. 테이블 문서 길이 줄이기는 평가 후 |
+| R5 폐쇄망 빌드 | ✅ ORT API 를 **리플렉션으로만** 부르면 컴파일 의존성이 없다 → `-Poffline` 빌드에 영향 없음 | 폐쇄망 실행은 `semantic.modelPath`·`semantic.runtimeJar` 로 파일 지정 |
+
+품질 맛보기 (실제 회사 스키마, 테이블 문서만, 키워드 합치기 없음):
+급여·연차·퇴직금·교육 질의는 상위 5개가 모두 관련 테이블. "인사이동 이력" 은 인사 이력 계열을 찾았지만 "발령이력" 은 상위 5개 밖 →
+컬럼 문서·키워드 합치기(S3)가 필요. e5 점수가 0.82~0.90 에 몰려 있어 **고정 문턱값(0.75)은 의미가 없다** → S3 에서 상대 문턱(1위 대비 차이) 검토.
+
 ## 5. 평가 (기본값을 켜기 전 게이트)
 
 - **공개 평가셋**: `samples/hr-project` 스키마로 질의 30개 이상 (동의어·약어·컬럼 의미·코멘트 없음 4종).
