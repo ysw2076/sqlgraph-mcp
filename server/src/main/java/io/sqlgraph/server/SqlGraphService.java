@@ -6,6 +6,8 @@ import io.sqlgraph.connector.JdbcSchemaSource;
 import io.sqlgraph.connector.detect.DbConfigDetector;
 import io.sqlgraph.connector.detect.DetectedDb;
 import io.sqlgraph.core.index.Indexer;
+import io.sqlgraph.core.semantic.EmbeddingIndexer;
+import io.sqlgraph.core.spi.Embedder;
 import io.sqlgraph.core.spi.SchemaSource;
 import io.sqlgraph.core.spi.SqlExtractor;
 import io.sqlgraph.core.store.GraphStore;
@@ -18,6 +20,9 @@ import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.PathMatcher;
+import java.time.Duration;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -41,15 +46,38 @@ public final class SqlGraphService implements AutoCloseable {
     private final Consumer<String> log;
     private final DriverResolver resolver;
     private GraphStore store;
+    private final EmbedderFactory embedders;
+    /** 마지막으로 시작한 의미 검색 작업 (없으면 null) */
+    private volatile SemanticJob job;
+
+    /** 의미 검색 상태 */
+    public enum SemanticState { OFF, NONE, PREPARING, RUNNING, READY, FAILED, CANCELLED }
+
+    /**
+     * @param model     READY 일 때 emb_model
+     * @param docs      READY 일 때 emb 행 수
+     * @param updatedAt READY 일 때 emb_updated_at
+     */
+    public record SemanticStatus(SemanticState state, int done, int total, String message,
+                                 String model, int docs, String updatedAt) {}
+
+    /** 같은 인덱스에 이전 작업이 끝나기를 기다리는 최대 시간 */
+    private static final Duration STOP_WAIT = Duration.ofMinutes(2);
 
     public SqlGraphService(Config config, Consumer<String> log) {
         this(config, log, null);
     }
 
     public SqlGraphService(Config config, Consumer<String> log, DriverResolver resolver) {
+        this(config, log, resolver, null);
+    }
+
+    /** @param embedders 의미 검색용 Embedder 공장 (null 이면 의미 검색 작업을 시작하지 않음) */
+    public SqlGraphService(Config config, Consumer<String> log, DriverResolver resolver, EmbedderFactory embedders) {
         this.config = config;
         this.log = log == null ? s -> { } : log;
         this.resolver = resolver;
+        this.embedders = embedders;
     }
 
     public Config config() {
@@ -71,6 +99,7 @@ public final class SqlGraphService implements AutoCloseable {
     }
 
     public synchronized Outcome indexWithDetails() throws Exception {
+        stopSemantic();   // 같은 인덱스에 이전 임베딩 작업이 동시에 쓰지 않도록
         List<SchemaSource> sources = new ArrayList<>();
         List<String> dbLines = new ArrayList<>();
         List<String> notes = new ArrayList<>();
@@ -116,7 +145,131 @@ public final class SqlGraphService implements AutoCloseable {
         Indexer.Report report = new Indexer(log).run(sources, extractors, opt, store());
         store().setMeta("databases", String.join("\n", dbLines));
         store().setMeta("detect_notes", String.join("\n", notes));
-        return new Outcome(report, dbLines, notes);
+        Outcome outcome = new Outcome(report, dbLines, notes);
+        if (semanticEnabled()) startSemantic();
+        return outcome;
+    }
+
+    // ============================================================== 의미 검색 (백그라운드 임베딩)
+
+    /** 설정에서 켜져 있고 공장이 있는가 */
+    public boolean semanticEnabled() {
+        return config.semantic() != null && config.semantic().enabled() && embedders != null;
+    }
+
+    private void startSemantic() {
+        SemanticJob j = new SemanticJob();
+        Thread t = new Thread(j::run, "sqlgraph-semantic");
+        t.setDaemon(true);
+        j.thread = t;
+        job = j;
+        t.start();
+    }
+
+    /** 돌고 있는 작업을 취소하고 끝날 때까지 기다린다 */
+    private void stopSemantic() {
+        SemanticJob j = job;
+        if (j == null || j.thread == null || !j.thread.isAlive()) return;
+        j.cancel.set(true);
+        j.thread.interrupt();
+        try {
+            j.thread.join(STOP_WAIT.toMillis());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (j.thread.isAlive()) log.accept("의미 검색 작업이 " + STOP_WAIT.toSeconds() + "초 안에 끝나지 않았습니다");
+    }
+
+    /**
+     * 작업이 끝날 때까지 기다린다 (CLI·테스트용).
+     *
+     * @return 끝났으면(또는 작업이 없으면) true
+     */
+    public boolean awaitSemantic(Duration timeout) throws InterruptedException {
+        SemanticJob j = job;
+        if (j == null || j.thread == null) return true;
+        j.thread.join(Math.max(1, timeout.toMillis()));
+        return !j.thread.isAlive();
+    }
+
+    /** 작업이 있으면 그 상태, 없으면 저장된 임베딩으로 READY/NONE, 꺼져 있으면 OFF */
+    public SemanticStatus semanticStatus() throws Exception {
+        SemanticJob j = job;
+        if (j != null) {
+            SemanticState s = j.state;
+            if (s == SemanticState.READY) return stored(SemanticState.READY);
+            return new SemanticStatus(s, j.done, j.total, j.message, null, 0, null);
+        }
+        if (!config.semantic().enabled()) return new SemanticStatus(SemanticState.OFF, 0, 0, null, null, 0, null);
+        if (!indexExists()) return new SemanticStatus(SemanticState.NONE, 0, 0, null, null, 0, null);
+        return stored(null);
+    }
+
+    /** meta·emb 로 READY 정보. want 가 null 이면 데이터가 있을 때만 READY, 없으면 NONE */
+    private SemanticStatus stored(SemanticState want) throws Exception {
+        GraphStore st = store();
+        Map<String, String> meta = st.meta();
+        String model = meta.get("emb_model");
+        int docs = st.embCount();
+        if (want == null && (model == null || docs == 0)) {
+            return new SemanticStatus(SemanticState.NONE, 0, 0, null, null, 0, null);
+        }
+        return new SemanticStatus(SemanticState.READY, docs, docs, null, model, docs, meta.get("emb_updated_at"));
+    }
+
+    /** 백그라운드 임베딩 작업 하나. 자기 GraphStore 연결을 열어 쓰고 닫는다 */
+    private final class SemanticJob {
+        final AtomicBoolean cancel = new AtomicBoolean();
+        volatile Thread thread;
+        volatile SemanticState state = SemanticState.PREPARING;
+        volatile int done;
+        volatile int total;
+        volatile String message;
+
+        void run() {
+            Embedder embedder = null;
+            try {
+                if (cancel.get()) throw new CancellationException();
+                embedder = embedders.open(config.semantic(), log);
+                if (embedder == null) throw new IllegalStateException("Embedder 를 열지 못했습니다");
+                if (cancel.get()) throw new CancellationException();
+                state = SemanticState.RUNNING;
+                try (GraphStore st = GraphStore.open(config.index())) {
+                    EmbeddingIndexer.Result r = new EmbeddingIndexer().run(st, embedder, 32, cancel::get, (d, t) -> {
+                        total = t;
+                        done = d;
+                    });
+                    log.accept("의미 검색: 문서 " + r.docs() + " (새로 " + r.embedded() + ", 재사용 " + r.reused() + ")");
+                }
+                state = SemanticState.READY;
+            } catch (Throwable e) {
+                if (cancel.get() || e instanceof CancellationException) {
+                    state = SemanticState.CANCELLED;
+                    log.accept("의미 검색: 취소됨");
+                } else {
+                    message = describe(e);
+                    state = SemanticState.FAILED;
+                    log.accept("의미 검색 실패: " + message);
+                }
+            } finally {
+                if (embedder instanceof AutoCloseable c) {
+                    try {
+                        c.close();
+                    } catch (Exception e) {
+                        log.accept("Embedder 닫기 실패: " + e.getMessage());
+                    }
+                }
+            }
+        }
+    }
+
+    private static String describe(Throwable e) {
+        String m = e.getMessage();
+        if (m == null || m.isBlank()) {
+            Throwable c = e.getCause();
+            m = c != null && c.getMessage() != null ? c.getMessage() : e.getClass().getSimpleName();
+        }
+        return m;
     }
 
     private SchemaSource createSource(Config.Db db) throws IOException {
@@ -203,6 +356,7 @@ public final class SqlGraphService implements AutoCloseable {
 
     @Override
     public synchronized void close() throws Exception {
+        stopSemantic();
         if (store != null) store.close();
     }
 }

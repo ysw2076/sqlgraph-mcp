@@ -35,11 +35,44 @@ import java.util.Map;
  * sources:
  *   include: ["**&#47;*.xml", "**&#47;*.sql"]
  *   exclude: ["**&#47;test/**"]
+ * semantic:                          # 의미 검색 (생략 시 꺼짐, 환경변수 SQLGRAPH_SEMANTIC=on|off 로도 변경)
+ *   enabled: true
+ *   provider: onnx                   # 지금은 onnx 만
+ *   modelPath: models/e5             # 생략 시 자동 내려받기
+ *   runtimeJar: libs/onnxruntime.jar # 생략 시 자동
+ *   threads: 0                       # 0 = 자동
  * </pre>
  */
 public record Config(Path file, Path baseDir, Path project, Path index, List<Db> databases,
                      List<String> include, List<String> exclude, long maxFileBytes,
-                     boolean autoDetect, String profile) {
+                     boolean autoDetect, String profile, Semantic semantic) {
+
+    /**
+     * 의미 검색(임베딩) 설정.
+     *
+     * @param modelPath  모델 폴더 또는 .onnx (null 이면 자동 내려받기)
+     * @param runtimeJar onnxruntime jar (null 이면 자동)
+     * @param threads    ONNX 스레드 수 (0 = 자동)
+     */
+    public record Semantic(boolean enabled, Path modelPath, Path runtimeJar, int threads) {
+        public static final Semantic OFF = new Semantic(false, null, null, 0);
+
+        public Semantic withEnabled(boolean e) {
+            return new Semantic(e, modelPath, runtimeJar, threads);
+        }
+    }
+
+    public Config {
+        if (semantic == null) semantic = Semantic.OFF;
+    }
+
+    /** 이전 버전 호환 (의미 검색 꺼짐) */
+    public Config(Path file, Path baseDir, Path project, Path index, List<Db> databases,
+                  List<String> include, List<String> exclude, long maxFileBytes,
+                  boolean autoDetect, String profile) {
+        this(file, baseDir, project, index, databases, include, exclude, maxFileBytes, autoDetect, profile,
+                Semantic.OFF);
+    }
 
     public record Db(String id, String type, String url, String user, String password, String passwordEnv,
                      String driverJar, String driverClass, String schema, List<String> files, String dialect,
@@ -99,7 +132,54 @@ public record Config(Path file, Path baseDir, Path project, Path index, List<Db>
             if (s.get("maxFileKb") instanceof Number num) maxBytes = num.longValue() * 1024;
         }
         return new Config(abs, base, project, index, dbs, include, exclude, maxBytes, autoDetect,
-                str(root.get("profile"), null));
+                str(root.get("profile"), null), semantic(root.get("semantic"), base));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Semantic semantic(Object o, Path base) {
+        if (!(o instanceof Map<?, ?> m)) return Semantic.OFF;
+        Map<String, Object> s = (Map<String, Object>) m;
+        Object en = s.get("enabled");
+        boolean enabled = en instanceof Boolean b ? b : en != null && Boolean.parseBoolean(String.valueOf(en).strip());
+        String provider = str(s.get("provider"), null);
+        if (provider != null && !provider.isBlank() && !provider.strip().equalsIgnoreCase("onnx")) {
+            throw new IllegalArgumentException("semantic.provider '" + provider
+                    + "' 는 지원하지 않습니다. 지금은 onnx 만 쓸 수 있습니다 (생략하면 onnx)");
+        }
+        Path model = s.get("modelPath") == null ? null : base.resolve(str(s.get("modelPath"), null)).normalize();
+        Path jar = s.get("runtimeJar") == null ? null : base.resolve(str(s.get("runtimeJar"), null)).normalize();
+        int threads = 0;
+        Object t = s.get("threads");
+        if (t instanceof Number n) {
+            threads = n.intValue();
+        } else if (t != null) {
+            try {
+                threads = Integer.parseInt(String.valueOf(t).strip());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("semantic.threads 는 정수여야 합니다: " + t);
+            }
+        }
+        if (threads < 0) throw new IllegalArgumentException("semantic.threads 는 0 이상이어야 합니다: " + threads);
+        return new Semantic(enabled, model, jar, threads);
+    }
+
+    /**
+     * 환경변수 SQLGRAPH_SEMANTIC 값 적용: on|true|1 → 켬, off|false|0 → 끔, 그 외(null·빈 값 포함) → 그대로.
+     */
+    public static Config applySemanticEnv(Config c, String value) {
+        if (c == null || value == null) return c;
+        String v = value.strip().toLowerCase(java.util.Locale.ROOT);
+        return switch (v) {
+            case "on", "true", "1" -> c.withSemantic(c.semantic().withEnabled(true));
+            case "off", "false", "0" -> c.withSemantic(c.semantic().withEnabled(false));
+            default -> c;
+        };
+    }
+
+    /** 같은 설정에 의미 검색 설정만 바꾼 것 */
+    public Config withSemantic(Semantic s) {
+        return new Config(file, baseDir, project, index, databases, include, exclude, maxFileBytes, autoDetect,
+                profile, s == null ? Semantic.OFF : s);
     }
 
     /** 설정 파일 없이 프로젝트 폴더만으로 (DB 는 자동 탐지) */
@@ -111,12 +191,13 @@ public record Config(Path file, Path baseDir, Path project, Path index, List<Db>
     /** 같은 설정에 프로필만 바꾼 것 */
     public Config withProfile(String p) {
         return new Config(file, baseDir, project, index, databases, include, exclude, maxFileBytes, autoDetect,
-                p == null ? profile : p);
+                p == null ? profile : p, semantic);
     }
 
     /** DB 없이 소스만 인덱싱 */
     public Config withoutDatabases() {
-        return new Config(file, baseDir, project, index, List.of(), include, exclude, maxFileBytes, false, profile);
+        return new Config(file, baseDir, project, index, List.of(), include, exclude, maxFileBytes, false, profile,
+                semantic);
     }
 
     private static String str(Object o, String def) {

@@ -326,6 +326,7 @@ public final class Tools {
         sb.append("- 쿼리 ").append(c.get("statements")).append(" (파싱 실패 ").append(c.get("parseFailed"))
                 .append(", 동적 ").append(c.get("dynamic")).append(")\n");
         sb.append("- 쿼리 조인에서 찾은 관계 ").append(c.get("relations")).append("개\n");
+        sb.append("- 의미 검색: ").append(semanticLine(svc.semanticStatus())).append('\n');
         List<String> unknown = st.unknownTables(15);
         if (!unknown.isEmpty()) {
             sb.append("- DB 메타데이터에 없는 테이블 (쿼리 수): ").append(String.join(", ", unknown)).append('\n');
@@ -349,6 +350,19 @@ public final class Tools {
             }
         }
         return sb.toString();
+    }
+
+    /** index_status 의 "의미 검색:" 뒤에 붙는 설명 */
+    static String semanticLine(SqlGraphService.SemanticStatus s) {
+        return switch (s.state()) {
+            case OFF -> "꺼짐 (sqlgraph.yml 의 semantic.enabled: true 또는 SQLGRAPH_SEMANTIC=on 으로 켬)";
+            case PREPARING -> "준비 중 (모델 확인·내려받기)";
+            case RUNNING -> "임베딩 중 " + s.done() + "/" + s.total();
+            case READY -> "준비됨 — 모델 " + s.model() + ", 문서 " + s.docs() + ", 갱신 " + s.updatedAt();
+            case NONE -> "아직 없음 (다시 인덱싱하면 만듦)";
+            case FAILED -> "실패: " + s.message();
+            case CANCELLED -> "취소됨";
+        };
     }
 
     String indexProject(String path, String profile, boolean skipDb) throws Exception {
@@ -383,6 +397,9 @@ public final class Tools {
         if (!notes.isEmpty()) {
             sb.append("\n확인 필요:\n");
             notes.forEach(w -> sb.append("- ").append(w).append('\n'));
+        }
+        if (r.config().semantic().enabled()) {
+            sb.append("\n의미 검색: 백그라운드에서 임베딩을 시작했습니다 (index_status 로 진행 확인)\n");
         }
         sb.append("\n이제 search_table, describe_table, impact_analysis, find_query 로 조회할 수 있습니다.");
         return sb.toString();

@@ -6,12 +6,16 @@ import io.sqlgraph.core.store.GraphStore;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
+import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
 
 /**
  * 임베딩 문서를 만들어 캐시에 없는 것만 임베딩하고 graph.db 의 emb/emb_cache 에 쓴다.
@@ -31,6 +35,17 @@ public final class EmbeddingIndexer {
     public record Result(int docs, int embedded, int reused, int removed) {}
 
     public Result run(GraphStore store, Embedder embedder, int batchSize) throws Exception {
+        return run(store, embedder, batchSize, () -> false, (d, t) -> { });
+    }
+
+    /**
+     * @param cancelled 배치마다 확인한다. true 면 아무것도 쓰지 않고 {@link CancellationException}
+     * @param progress  (끝낸 수, 새로 임베딩할 전체 수). 시작 때 (0, total), 배치마다 누적, 끝에 (total, total)
+     */
+    public Result run(GraphStore store, Embedder embedder, int batchSize, BooleanSupplier cancelled,
+                      BiConsumer<Integer, Integer> progress) throws Exception {
+        if (cancelled == null) cancelled = () -> false;
+        if (progress == null) progress = (d, t) -> { };
         if (batchSize <= 0) throw new IllegalArgumentException("batchSize 는 1 이상이어야 합니다: " + batchSize);
         String modelId = embedder.modelId();
         int dim = embedder.dim();
@@ -56,7 +71,10 @@ public final class EmbeddingIndexer {
         Map<String, float[]> vectors = new LinkedHashMap<>();
         List<String> hashes = new ArrayList<>(pending.keySet());
         List<String> texts = new ArrayList<>(pending.values());
+        int total = texts.size();
+        progress.accept(0, total);
         for (int from = 0; from < texts.size(); from += batchSize) {
+            if (cancelled.getAsBoolean()) throw new CancellationException("임베딩이 취소되었습니다");
             int to = Math.min(texts.size(), from + batchSize);
             List<String> batch = texts.subList(from, to);
             float[][] out = embedder.embed(List.copyOf(batch), Embedder.Kind.DOCUMENT);
@@ -71,13 +89,17 @@ public final class EmbeddingIndexer {
                 }
                 vectors.put(hashes.get(from + i), normalize(out[i]));
             }
+            if (to < total) progress.accept(to, total);
         }
+        if (cancelled.getAsBoolean()) throw new CancellationException("임베딩이 취소되었습니다");
 
         Map<String, String> meta = new LinkedHashMap<>();
         meta.put("emb_model", modelId);
         meta.put("emb_dim", String.valueOf(dim));
         meta.put("emb_doc_version", DOC_VERSION);
+        meta.put("emb_updated_at", Instant.now().toString());
         int removed = store.writeEmbeddings(vectors, rows, meta);
+        progress.accept(total, total);
         return new Result(docs.size(), embedded, reused, removed);
     }
 

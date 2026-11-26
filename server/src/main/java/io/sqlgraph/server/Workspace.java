@@ -23,6 +23,7 @@ public final class Workspace implements AutoCloseable {
     private final ProjectRegistry registry;
     private final DriverResolver resolver;
     private final Consumer<String> log;
+    private final EmbedderFactory embedders;
     private final Path cwd;
     private final Map<String, SqlGraphService> open = new LinkedHashMap<>();
     private Path current;
@@ -30,7 +31,13 @@ public final class Workspace implements AutoCloseable {
     private Config pinned;
 
     public Workspace(SqlGraphHome home, Path cwd, Consumer<String> log) {
+        this(home, cwd, log, null);
+    }
+
+    /** @param embedders 의미 검색용 Embedder 공장 (null 이면 기본 ONNX) */
+    public Workspace(SqlGraphHome home, Path cwd, Consumer<String> log, EmbedderFactory embedders) {
         this.home = home;
+        this.embedders = embedders != null ? embedders : EmbedderFactory.onnx(home);
         this.registry = new ProjectRegistry(home.registryFile());
         this.resolver = new DriverResolver(home.drivers(), log);
         this.log = log == null ? s -> { } : log;
@@ -93,6 +100,10 @@ public final class Workspace implements AutoCloseable {
 
     /** 프로젝트의 설정: 고정된 설정 → 등록된 설정 파일 → 프로젝트 루트의 sqlgraph.yml → 자동 탐지 */
     public Config configFor(Path project) throws Exception {
+        return Config.applySemanticEnv(baseConfigFor(project), System.getenv("SQLGRAPH_SEMANTIC"));
+    }
+
+    private Config baseConfigFor(Path project) throws Exception {
         if (pinned != null && SqlGraphHome.key(pinned.project()).equals(SqlGraphHome.key(project))) return pinned;
         Path defaultIndex = home.indexFor(project);
         var entry = registry.find(project);
@@ -109,7 +120,7 @@ public final class Workspace implements AutoCloseable {
         String key = SqlGraphHome.key(project);
         SqlGraphService s = open.get(key);
         if (s == null) {
-            s = new SqlGraphService(configFor(project), log, resolver);
+            s = new SqlGraphService(configFor(project), log, resolver, embedders);
             if (!s.indexExists()) {
                 throw new IllegalArgumentException("'" + project + "' 는 아직 인덱싱되지 않았습니다. "
                         + "index_project 를 먼저 실행하세요");
@@ -130,7 +141,7 @@ public final class Workspace implements AutoCloseable {
         String key = SqlGraphHome.key(project);
         SqlGraphService old = open.remove(key);
         if (old != null) old.close();
-        SqlGraphService svc = new SqlGraphService(cfg, log, resolver);
+        SqlGraphService svc = new SqlGraphService(cfg, log, resolver, embedders);
         SqlGraphService.Outcome out = svc.indexWithDetails();
         open.put(key, svc);
         Path cfgFile = pinned != null && cfg.file() != null && cfg.file().equals(pinned.file()) ? pinned.file() : null;

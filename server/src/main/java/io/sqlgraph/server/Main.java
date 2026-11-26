@@ -101,9 +101,32 @@ public final class Main implements Runnable {
                 String target = path != null ? path.toAbsolutePath().toString()
                         : config != null ? ws.current().toString() : ws.cwd().toString();
                 System.out.println(new Tools(ws, new ObjectMapper()).indexProject(target, profile, skipDb));
+                Path project = ws.current();
+                if (project != null) {
+                    SqlGraphService svc = ws.service(project);
+                    if (svc.semanticEnabled()) awaitSemantic(svc, quiet);
+                }
             }
-            return 0;
+            return 0;   // 임베딩이 실패해도 인덱싱은 성공
         }
+    }
+
+    /** 의미 검색 작업을 기다리며 진행을 대략 10% 단위로 보여 주고, 결과 상태 한 줄을 출력 */
+    static void awaitSemantic(SqlGraphService svc, boolean quiet) throws Exception {
+        int lastBucket = -1;
+        while (!svc.awaitSemantic(java.time.Duration.ofMillis(500))) {
+            if (quiet) continue;
+            SqlGraphService.SemanticStatus s = svc.semanticStatus();
+            if (s.state() == SqlGraphService.SemanticState.RUNNING && s.total() > 0) {
+                int bucket = (int) (s.done() * 10L / s.total());
+                if (bucket != lastBucket) {
+                    lastBucket = bucket;
+                    System.err.println("[sqlgraph] 의미 검색: 임베딩 " + s.done() + "/" + s.total()
+                            + " (" + bucket * 10 + "%)");
+                }
+            }
+        }
+        System.out.println("의미 검색: " + Tools.semanticLine(svc.semanticStatus()));
     }
 
     @Command(name = "call", description = "도구 직접 호출 (테스트용). 예: sqlgraph call describe_table '{\"table\":\"HR_EMP\"}'")
