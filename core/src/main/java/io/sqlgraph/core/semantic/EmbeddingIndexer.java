@@ -52,6 +52,12 @@ public final class EmbeddingIndexer {
         if (dim <= 0) throw new IllegalStateException("Embedder 차원이 올바르지 않습니다: " + dim);
 
         List<DocBuilder.Doc> docs = DocBuilder.build(store);
+        if (docs.isEmpty()) {
+            // 테이블이 하나도 없으면(대개 DB 연결 실패로 메타데이터를 못 읽은 경우) 아무것도 쓰지 않는다.
+            // 여기서 캐시를 정리하면 DB 가 돌아왔을 때 전부 다시 임베딩해야 한다.
+            progress.accept(0, 0);
+            return new Result(0, 0, 0, 0);
+        }
         Set<String> cached = store.embCacheHashes();
 
         List<GraphStore.EmbRow> rows = new ArrayList<>(docs.size());

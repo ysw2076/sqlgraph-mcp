@@ -241,6 +241,9 @@ public final class SqlGraphService implements AutoCloseable {
                         total = t;
                         done = d;
                     });
+                    if (r.docs() == 0) {
+                        log.accept("의미 검색: 테이블이 없어 임베딩을 건너뜁니다 (DB 연결 실패 등). 저장된 임베딩 캐시는 그대로 둡니다");
+                    }
                     log.accept("의미 검색: 문서 " + r.docs() + " (새로 " + r.embedded() + ", 재사용 " + r.reused() + ")");
                 }
                 state = SemanticState.READY;
