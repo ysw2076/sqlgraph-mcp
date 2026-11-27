@@ -228,6 +228,9 @@ DDL 파일 (접속 불가 환경)         iBatis 2 SqlMap XML             쿼리
 - **방언 보정**: 1차 파싱이 실패하면 MySQL `||`(OR), 숫자로 시작하는 컬럼명, `INTERVAL`, `DIV`, `DELETE t.* FROM`,
   예약어 별칭·테이블명, 백슬래시 이스케이프 등을 보정해서 다시 파싱합니다. 그래도 실패한 쿼리는
   `index_status` 에 유형·폴더별로 모아 보여 줍니다 ("파싱 실패 목록 50건 보여줘" → `failures`).
+- **DB 접속 실패**: 다시 인덱싱할 때 DB 에 접속하지 못하면(VPN 끊김 등) 그 DB 는 지난 인덱스의 테이블·컬럼·FK 를 그대로 쓰고
+  소스의 쿼리만 새로 반영합니다. `index_project` 결과와 `index_status` 에 `DB 연결 실패로 이전 메타데이터 사용: <db> (테이블 N개, 마지막 성공 …)`
+  줄이 보입니다. 처음 인덱싱에서 실패하면 테이블 없이 쿼리만 인덱싱합니다.
 - **코드 속 SQL** (Java·Kotlin·Scala·Groovy·C#·JS/TS·Go·PHP·Python·Ruby):
   - 문자열 리터럴 중 SQL 문장 구조(SELECT…FROM, INSERT INTO, UPDATE…SET …)를 갖춘 것만 추출합니다. 영문 문장("Select a file from…")은 제외.
   - `"SELECT .." + "FROM .."`, `StringBuilder.append(..)` 체인, `sql += ".."` 누적을 한 문장으로 합칩니다.

@@ -233,6 +233,10 @@ DDL files (no DB access)             iBatis 2 SqlMap XML           query ─ tab
 - **Dialect fallback**: when the first parse fails, MySQL `||` (OR), column names starting with a digit, `INTERVAL`, `DIV`, `DELETE t.* FROM`,
   reserved-word aliases/table names, backslash escapes and the like are normalized and parsed again. Queries that still fail are grouped
   by error kind and folder in `index_status` ("show me 50 parse failures" → `failures`).
+- **DB connection failures**: if a database can't be reached when re-indexing (VPN dropped, etc.), that database keeps the tables, columns and FKs
+  from the previous index and only the source queries are refreshed. `index_project` and `index_status` show a
+  `DB 연결 실패로 이전 메타데이터 사용: <db> (테이블 N개, 마지막 성공 …)` line ("previous metadata in use"). On the very first index a failure
+  just means no tables, as before.
 - **SQL in code** (Java, Kotlin, Scala, Groovy, C#, JS/TS, Go, PHP, Python, Ruby):
   - Only string literals with SQL statement structure (SELECT…FROM, INSERT INTO, UPDATE…SET …) are extracted; English sentences ("Select a file from…") are not.
   - `"SELECT .." + "FROM .."`, `StringBuilder.append(..)` chains and `sql += ".."` are joined into one statement;

@@ -21,6 +21,9 @@ import java.util.TreeMap;
 /** MCP 도구 정의와 실행. 결과는 토큰을 아끼도록 간결한 마크다운 텍스트로 돌려준다. */
 public final class Tools {
 
+    /** index_project·index_status 에서 이전 메타데이터를 쓰는 DB 줄의 머리말 */
+    static final String STALE_LABEL = "DB 연결 실패로 이전 메타데이터 사용: ";
+
     private final Workspace ws;
     private final ObjectMapper om;
 
@@ -377,6 +380,10 @@ public final class Tools {
         String dn = meta.get("detect_notes");
         if (dn != null && !dn.isBlank()) dn.lines().forEach(l -> sb.append("  ※ ").append(l).append('\n'));
         sb.append("- 테이블 ").append(c.get("tables")).append(" / 컬럼 ").append(c.get("columns")).append('\n');
+        String stale = meta.get(Indexer.META_STALE_DATABASES);
+        if (stale != null && !stale.isBlank()) {
+            sb.append("- ").append(STALE_LABEL).append(String.join(", ", stale.lines().toList())).append('\n');
+        }
         sb.append("- 쿼리 ").append(c.get("statements")).append(" (파싱 실패 ").append(c.get("parseFailed"))
                 .append(", 동적 ").append(c.get("dynamic")).append(")\n");
         sb.append("- 쿼리 조인에서 찾은 관계 ").append(c.get("relations")).append("개\n");
@@ -443,6 +450,9 @@ public final class Tools {
             r.outcome().databases().forEach(d -> sb.append("  - ").append(d).append('\n'));
         }
         sb.append("- 테이블 ").append(rep.tables()).append(", 컬럼 ").append(rep.columns()).append('\n');
+        if (!rep.staleDatabases().isEmpty()) {
+            sb.append("- ").append(STALE_LABEL).append(String.join(", ", rep.staleDatabases())).append('\n');
+        }
         sb.append("- 파일 ").append(rep.filesScanned()).append("개 스캔 (쿼리 있는 파일 ").append(rep.filesWithSql()).append(")\n");
         sb.append("- 쿼리 ").append(rep.statements()).append("건: 파싱 성공 ").append(rep.parsed())
                 .append(", 실패 ").append(rep.failed()).append(", 동적 ").append(rep.dynamic()).append('\n');

@@ -40,9 +40,19 @@ public final class Indexer {
 
     public record Options(Path projectRoot, List<String> include, List<String> exclude, long maxFileBytes) {}
 
+    /**
+     * @param staleDatabases 이번에 메타데이터를 못 읽어 이전 인덱스의 메타데이터를 그대로 쓴 DB
+     *                       ("id (테이블 N개, 마지막 성공 시각)")
+     */
     public record Report(int databases, int tables, int columns, int filesScanned, int filesWithSql,
                          int statements, int parsed, int failed, int dynamic, long millis,
-                         List<String> warnings) {}
+                         List<String> warnings, List<String> staleDatabases) {}
+
+    /** meta 키: DB 별 마지막으로 메타데이터를 읽은 시각 ("db_loaded_at." + db id) */
+    public static final String META_DB_LOADED_AT = "db_loaded_at.";
+
+    /** meta 키: 이전 메타데이터를 쓰고 있는 DB 목록 (줄마다 하나, 없으면 빈 문자열) */
+    public static final String META_STALE_DATABASES = "stale_databases";
 
     /** 기본으로 건너뛰는 폴더 */
     private static final Set<String> SKIP_DIRS = Set.of(
@@ -61,18 +71,38 @@ public final class Indexer {
         Instant start = Instant.now();
         List<String> warnings = new ArrayList<>();
 
-        // 1. DB 메타데이터
+        // 1. DB 메타데이터. 못 읽은 DB 는 이전 인덱스에 있던 메타데이터를 그대로 쓴다
+        //    (사내망이 잠깐 끊긴 때 다시 인덱싱해도 테이블·컬럼이 0 으로 덮어써지지 않도록)
+        String now = Instant.now().toString();
+        Map<String, String> prevMeta = previousMeta(store);
+        Map<String, String> loadedAt = new LinkedHashMap<>();
+        List<String> stale = new ArrayList<>();
         List<SchemaSnapshot> snapshots = new ArrayList<>();
         for (SchemaSource src : sources) {
             try {
                 log.accept("[db] " + src.id() + " 메타데이터 수집 중...");
                 SchemaSnapshot s = src.load();
                 snapshots.add(s);
+                loadedAt.put(src.id(), now);
                 s.warnings().stream().limit(20).forEach(w -> warnings.add("[" + src.id() + "] " + w));
                 log.accept("[db] " + src.id() + ": 테이블 " + s.tables().size() + "개");
             } catch (Exception e) {
-                warnings.add("[" + src.id() + "] 메타데이터 수집 실패: " + e.getMessage());
-                log.accept("[db] " + src.id() + " 실패: " + e.getMessage());
+                SchemaSnapshot prev = previousSnapshot(store, src.id());
+                if (prev == null) {
+                    warnings.add("[" + src.id() + "] 메타데이터 수집 실패: " + e.getMessage());
+                    log.accept("[db] " + src.id() + " 실패: " + e.getMessage());
+                    continue;
+                }
+                // 이 키가 없는 인덱스(이 기능 이전)는 직전 인덱싱 때 읽은 것이다: 그때 실패했다면 테이블이 없었다
+                String at = prevMeta.getOrDefault(META_DB_LOADED_AT + src.id(),
+                        prevMeta.getOrDefault("indexed_at", "알 수 없음"));
+                snapshots.add(prev);
+                loadedAt.put(src.id(), at);
+                stale.add(src.id() + " (테이블 " + prev.tables().size() + "개, 마지막 성공 " + at + ")");
+                warnings.add("[" + src.id() + "] 메타데이터 수집 실패: " + e.getMessage()
+                        + " → 이전 메타데이터 유지 (마지막 성공 " + at + ")");
+                log.accept("[db] " + src.id() + " 실패: " + e.getMessage() + " → 이전 메타데이터 유지 (테이블 "
+                        + prev.tables().size() + "개, 마지막 성공 " + at + ")");
             }
         }
         Map<String, Set<String>> columnIndex = buildColumnIndex(snapshots);
@@ -129,10 +159,31 @@ public final class Indexer {
         meta.put("project_root", String.valueOf(opt.projectRoot()));
         meta.put("index_millis", String.valueOf(millis));
         meta.put("warnings", String.join("\n", warnings.stream().limit(50).toList()));
+        loadedAt.forEach((id, at) -> meta.put(META_DB_LOADED_AT + id, at));
+        meta.put(META_STALE_DATABASES, String.join("\n", stale));
         store.replaceAll(snapshots, stmts, meta);
 
         return new Report(snapshots.size(), tables, columns, files[0], files[1], stmts.size(), parsed,
-                stmts.size() - parsed, dynamic, millis, warnings);
+                stmts.size() - parsed, dynamic, millis, warnings, List.copyOf(stale));
+    }
+
+    private Map<String, String> previousMeta(GraphStore store) {
+        try {
+            return store.meta();
+        } catch (Exception e) {
+            log.accept("[db] 이전 인덱스 정보를 읽지 못함: " + e.getMessage());
+            return Map.of();
+        }
+    }
+
+    /** 이전 인덱스에 있던 그 DB 의 메타데이터 (없거나 읽지 못하면 null) */
+    private SchemaSnapshot previousSnapshot(GraphStore store, String dbId) {
+        try {
+            return store.loadSnapshot(dbId);
+        } catch (Exception e) {
+            log.accept("[db] " + dbId + " 이전 메타데이터를 읽지 못함: " + e.getMessage());
+            return null;
+        }
     }
 
     private record SourceFile(Path path, String rel, List<SqlExtractor> extractors) {}

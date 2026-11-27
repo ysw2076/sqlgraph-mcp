@@ -320,6 +320,66 @@ public final class GraphStore implements AutoCloseable {
         return m;
     }
 
+    /**
+     * 지금 인덱스에 저장된 DB 하나의 메타데이터(테이블·컬럼·FK)를 스냅숏으로 되살린다.
+     * 다시 인덱싱할 때 그 DB 를 못 읽으면 이것을 대신 쓴다. 테이블이 하나도 없으면 null.
+     */
+    public SchemaSnapshot loadSnapshot(String dbId) throws SQLException {
+        String product = null;
+        try (PreparedStatement ps = conn.prepareStatement("SELECT product FROM db WHERE id = ?")) {
+            ps.setString(1, dbId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) product = rs.getString(1);
+            }
+        }
+        Map<Long, String> names = new LinkedHashMap<>();
+        Map<Long, String[]> heads = new LinkedHashMap<>();   // id → {schema, name, kind, comment}
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT id, schema_name, name, kind, comment FROM tbl WHERE db_id = ? ORDER BY id")) {
+            ps.setString(1, dbId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    long id = rs.getLong(1);
+                    names.put(id, rs.getString(3));
+                    heads.put(id, new String[]{rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5)});
+                }
+            }
+        }
+        if (heads.isEmpty()) return null;
+        Map<Long, List<DbColumn>> cols = new HashMap<>();
+        try (PreparedStatement ps = conn.prepareStatement("""
+                SELECT c.tbl_id, c.name, c.type, c.size, c.nullable, c.pk, c.ordinal, c.comment
+                FROM col c JOIN tbl t ON t.id = c.tbl_id WHERE t.db_id = ? ORDER BY c.tbl_id, c.ordinal, c.id""")) {
+            ps.setString(1, dbId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    int size = rs.getInt(4);
+                    Integer sz = rs.wasNull() ? null : size;
+                    cols.computeIfAbsent(rs.getLong(1), k -> new ArrayList<>()).add(new DbColumn(
+                            rs.getString(2), rs.getString(3), sz, rs.getInt(5) == 1, rs.getInt(6) == 1,
+                            rs.getInt(7), rs.getString(8)));
+                }
+            }
+        }
+        List<DbTable> tables = new ArrayList<>(heads.size());
+        for (var e : heads.entrySet()) {
+            String[] h = e.getValue();
+            tables.add(new DbTable(h[0], h[1], h[2], h[3], cols.getOrDefault(e.getKey(), List.of())));
+        }
+        List<ForeignKey> fks = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement("""
+                SELECT f.tbl_id, f.col, f.ref_table, f.ref_col
+                FROM fk f JOIN tbl t ON t.id = f.tbl_id WHERE t.db_id = ? ORDER BY f.rowid""")) {
+            ps.setString(1, dbId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    fks.add(new ForeignKey(names.get(rs.getLong(1)), rs.getString(2), rs.getString(3), rs.getString(4)));
+                }
+            }
+        }
+        return new SchemaSnapshot(dbId, product, tables, fks, List.of());
+    }
+
     public List<Map.Entry<String, String>> databases() throws SQLException {
         List<Map.Entry<String, String>> r = new ArrayList<>();
         try (Statement s = conn.createStatement(); ResultSet rs = s.executeQuery("SELECT id, product FROM db ORDER BY id")) {
