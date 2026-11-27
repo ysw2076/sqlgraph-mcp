@@ -85,11 +85,14 @@ public final class JdbcSchemaSource implements SchemaSource {
         if (lower.startsWith("jdbc:mysql:") || lower.startsWith("jdbc:mariadb:")) {
             props.putIfAbsent("useInformationSchema", "true");
         }
+        // sqlite-jdbc 는 연결 뒤 setReadOnly 를 거부하므로 열 때부터 읽기 전용(SQLITE_OPEN_READONLY=1)으로 연다
+        boolean sqlite = lower.startsWith("jdbc:sqlite:");
+        if (sqlite) props.putIfAbsent("open_mode", "1");
         applyTimeouts(lower, props);
         if (s.properties() != null) props.putAll(s.properties());
 
         try (Connection conn = connect(url, props, warnings)) {
-            conn.setReadOnly(true);
+            if (!sqlite) conn.setReadOnly(true);
             DatabaseMetaData md = conn.getMetaData();
             String product = md.getDatabaseProductName() + " " + md.getDatabaseProductVersion();
             boolean catalogBased = lower.startsWith("jdbc:mysql:") || lower.startsWith("jdbc:mariadb:");
